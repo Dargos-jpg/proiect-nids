@@ -1,0 +1,1 @@
+# pachetul principal NIDS

@@ -1,0 +1,1 @@
+# interfata desktop PySide6

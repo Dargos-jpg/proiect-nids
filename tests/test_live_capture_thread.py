@@ -1,0 +1,45 @@
+from PySide6.QtWidgets import QApplication
+
+from nids.ui.live_capture_thread import LiveCaptureThread
+
+
+def _app() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def test_thread_emits_packet_captured(monkeypatch):
+    _app()
+
+    def fake_capture_live(on_packet, interface=None, stop_event=None):
+        on_packet("pkt1")
+        on_packet("pkt2")
+
+    monkeypatch.setattr("nids.ui.live_capture_thread.capture_live", fake_capture_live)
+
+    thread = LiveCaptureThread()
+    received = []
+    thread.packet_captured.connect(received.append)
+
+    thread.run()
+
+    assert received == ["pkt1", "pkt2"]
+
+
+def test_thread_emits_error_on_exception(monkeypatch):
+    _app()
+
+    def fake_capture_live(on_packet, interface=None, stop_event=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("nids.ui.live_capture_thread.capture_live", fake_capture_live)
+
+    thread = LiveCaptureThread()
+    errors = []
+    thread.error.connect(errors.append)
+
+    thread.run()
+
+    assert errors == ["boom"]

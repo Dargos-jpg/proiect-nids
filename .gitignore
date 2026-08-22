@@ -1,0 +1,30 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# date si modele - nu intra in git, prea mari / generate local
+data/raw/*
+!data/raw/.gitkeep
+data/models/*
+!data/models/.gitkeep
+*.pcap
+*.pcapng
+
+# loguri si audit trail generate local
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
