@@ -10,6 +10,13 @@ from nids.core.event import Event
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "nids.db"
 
+# limita implicita de AFISARE (nu de stocare - nimic nu se sterge din DB
+# niciodata, vezi jos). LogsPanel reconstruieste tabelul integral la
+# fiecare 2s, deci un numar prea mare ar putea incepe sa incetineasca UI-ul
+# dupa saptamani de utilizare - 2000 acopera generos utilizarea normala
+# fara riscul asta. userul poate cere oricand mai mult explicit (ex: export)
+DEFAULT_DISPLAY_LIMIT = 2000
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +112,7 @@ class EventStore:
             )
             self._conn.commit()
 
-    def recent(self, limit: int = 200) -> list[StoredEvent]:
+    def recent(self, limit: int = DEFAULT_DISPLAY_LIMIT) -> list[StoredEvent]:
         with self._lock:
             cursor = self._conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM events ORDER BY id DESC LIMIT ?",
@@ -125,7 +132,9 @@ class EventStore:
             rows = cursor.fetchall()
         return [row[0] for row in rows]
 
-    def events_for_source(self, source_ip: str, limit: int = 200) -> list[StoredEvent]:
+    def events_for_source(
+        self, source_ip: str, limit: int = DEFAULT_DISPLAY_LIMIT
+    ) -> list[StoredEvent]:
         """istoricul unei singure surse, in ordine CRONOLOGICA (cele mai
         vechi primele) - o naratiune, nu doar o lista plata de alerte"""
         with self._lock:

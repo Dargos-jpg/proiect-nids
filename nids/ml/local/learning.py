@@ -12,6 +12,7 @@ from nids.ml.local.model import LocalModel
 MIN_TRAINING_SAMPLES = 50
 RETRAIN_EVERY_N_SAMPLES = 25
 MAX_BUFFER_SIZE = 2000
+DEFAULT_N_ESTIMATORS = 100  # implicitul sklearn - vezi LocalModel.train()
 
 # subset de features numerice folosite pentru explicatia "cat de departe
 # de normal" - reprezentative din ambele categorii (basic + traffic),
@@ -85,11 +86,13 @@ class LocalModelManager:
         retrain_every: int = RETRAIN_EVERY_N_SAMPLES,
         max_buffer_size: int = MAX_BUFFER_SIZE,
         contamination: float | None = None,
+        n_estimators: int = DEFAULT_N_ESTIMATORS,
     ) -> None:
         self._min_training_samples = min_training_samples
         self._retrain_every = retrain_every
         self._max_buffer_size = max_buffer_size
         self._contamination = contamination
+        self._n_estimators = n_estimators
         self._buffer: list[NslKddStyleFeatures] = []
         self._model: LocalModel | None = None
         self._new_since_retrain = 0
@@ -131,6 +134,16 @@ class LocalModelManager:
         if self._model is None:
             return None
         return self._model.predict([record])[0]
+
+    def anomaly_score(self, record: NslKddStyleFeatures) -> float | None:
+        """scor continuu de anomalie (vezi LocalModel.anomaly_score) -
+        None cat timp modelul e inca in modul invatare, la fel ca
+        predict_only(). NU modifica bufferul - safe de apelat oricand,
+        atat din fluxul live (dupa process()) cat si din inspectia la
+        cerere"""
+        if self._model is None:
+            return None
+        return self._model.anomaly_score([record])[0]
 
     def explain(self, record: NslKddStyleFeatures) -> list[FeatureDeviation]:
         """compara valorile conexiunii cu media/deviatia standard din
@@ -182,7 +195,9 @@ class LocalModelManager:
 
     def _retrain(self) -> None:
         contamination = self._contamination if self._contamination is not None else "auto"
-        self._model = LocalModel.train(self._buffer, contamination=contamination)
+        self._model = LocalModel.train(
+            self._buffer, contamination=contamination, n_estimators=self._n_estimators
+        )
         self._new_since_retrain = 0
 
     def save(self, path: Path | None = None) -> None:

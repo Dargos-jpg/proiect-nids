@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nids.ml.local.learning import MAX_BUFFER_SIZE, MIN_TRAINING_SAMPLES, RETRAIN_EVERY_N_SAMPLES
+from nids.ml.local.learning import (
+    DEFAULT_N_ESTIMATORS,
+    MAX_BUFFER_SIZE,
+    MIN_TRAINING_SAMPLES,
+    RETRAIN_EVERY_N_SAMPLES,
+)
 
 DEFAULT_EVALUATION_INTERVAL_MS = 5000
 
@@ -24,5 +29,6 @@ class MlSettings:
     retrain_every: int = RETRAIN_EVERY_N_SAMPLES
     max_buffer_size: int = MAX_BUFFER_SIZE
     contamination: float | None = None  # None = 'auto' (implicit sklearn)
+    n_estimators: int = DEFAULT_N_ESTIMATORS  # numar de arbori Isolation Forest
     strict_reporting: bool = False  # True = raporteaza doar cand ambele modele sunt de acord
     evaluation_interval_ms: int = DEFAULT_EVALUATION_INTERVAL_MS

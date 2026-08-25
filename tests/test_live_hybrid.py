@@ -210,6 +210,34 @@ def test_event_carries_full_assessment_snapshot_reconstructible_from_json(monkey
     assert restored.local_is_learning is True
 
 
+def test_local_only_event_severity_reflects_anomaly_score(monkeypatch):
+    """verifica firul complet: LiveHybridAnalyzer citeste scorul de la
+    LocalModelManager si il paseaza mai departe catre event_for_agreement,
+    care il foloseste pentru severitate graduala in loc de mereu HIGH"""
+    monkeypatch.setattr(
+        "nids.core.live_hybrid.predict_connections",
+        lambda expert, records: [0] * len(records),  # expert: normal
+    )
+    monkeypatch.setattr("nids.core.live_hybrid.explain_connection", lambda expert, record: [])
+
+    from nids.core.event import Severity
+
+    local_manager = LocalModelManager(min_training_samples=100)
+    local_manager._model = object()  # simuleaza modelul activ (nu mai invata)
+    monkeypatch.setattr(local_manager, "process", lambda record: 1)  # local: anomalie
+    monkeypatch.setattr(local_manager, "anomaly_score", lambda record: 0.3)  # scor "sever"
+    monkeypatch.setattr(local_manager, "explain", lambda record: [])
+    monkeypatch.setattr(local_manager, "explain_categorical", lambda record: [])
+
+    analyzer = LiveHybridAnalyzer(expert=object(), local_manager=local_manager)
+    analyzer.add_packet(_packet("10.0.0.1", "10.0.0.2", 80))
+
+    events = analyzer.evaluate()
+
+    assert len(events) == 1
+    assert events[0].severity == Severity.HIGH
+
+
 def test_strict_reporting_suppresses_single_model_flags(monkeypatch):
     """expert semnaleaza, dar modelul local inca invata (LOCAL_LEARNING) -
     in mod strict, nu e destul de sigur ca sa genereze un eveniment"""

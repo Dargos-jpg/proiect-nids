@@ -164,6 +164,17 @@ def test_changing_contamination_spin_updates_settings_when_manual(tmp_path):
     assert settings.contamination == 0.33
 
 
+def test_changing_n_estimators_updates_settings(tmp_path):
+    _app()
+    dashboard = _make_dashboard(tmp_path)
+    settings = MlSettings()
+    panel = MlPanel(dashboard, settings)
+
+    panel._on_n_estimators_changed(200)
+
+    assert settings.n_estimators == 200
+
+
 def test_toggling_strict_reporting_updates_settings(tmp_path):
     _app()
     dashboard = _make_dashboard(tmp_path)

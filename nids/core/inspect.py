@@ -17,6 +17,7 @@ class ConnectionAssessment:
     expert_top_features: list[FeatureContribution]
     local_prediction: int | None
     local_is_learning: bool
+    local_anomaly_score: float | None
     local_deviations: list[FeatureDeviation]
     local_categorical_rarities: list[CategoricalRarity]
     agreement: Agreement | None
@@ -40,6 +41,7 @@ def assess_connection(
         expert_features = explain_connection(expert, record)
 
     local_pred: int | None = None
+    local_score: float | None = None
     local_deviations: list[FeatureDeviation] = []
     local_rarities: list[CategoricalRarity] = []
     local_is_learning = True
@@ -52,6 +54,7 @@ def assess_connection(
         local_rarities = local_manager.explain_categorical(record)
         if not local_is_learning:
             local_pred = local_manager.predict_only(record)
+            local_score = local_manager.anomaly_score(record)
 
     agreement: Agreement | None = None
     event_type = "evaluare incompleta"
@@ -68,6 +71,7 @@ def assess_connection(
         expert_top_features=expert_features,
         local_prediction=local_pred,
         local_is_learning=local_is_learning,
+        local_anomaly_score=local_score,
         local_deviations=local_deviations,
         local_categorical_rarities=local_rarities,
         agreement=agreement,
@@ -88,6 +92,7 @@ def assessment_to_json(assessment: ConnectionAssessment) -> str:
         "expert_top_features": [asdict(f) for f in assessment.expert_top_features],
         "local_prediction": assessment.local_prediction,
         "local_is_learning": assessment.local_is_learning,
+        "local_anomaly_score": assessment.local_anomaly_score,
         "local_deviations": [asdict(d) for d in assessment.local_deviations],
         "local_categorical_rarities": [asdict(r) for r in assessment.local_categorical_rarities],
         "event_type": assessment.event_type,
@@ -113,6 +118,7 @@ def assessment_from_json(raw: str) -> ConnectionAssessment:
         expert_top_features=[FeatureContribution(**f) for f in payload["expert_top_features"]],
         local_prediction=payload["local_prediction"],
         local_is_learning=payload["local_is_learning"],
+        local_anomaly_score=payload.get("local_anomaly_score"),
         local_deviations=[FeatureDeviation(**d) for d in payload["local_deviations"]],
         local_categorical_rarities=[
             CategoricalRarity(**r) for r in payload["local_categorical_rarities"]

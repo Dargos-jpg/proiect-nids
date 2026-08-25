@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nids.core.response_settings import ResponseSettings
 from nids.response.manager import BlockManager
 
 _ACTIVE_COLUMNS = ["IP", "motiv", "expira la"]
@@ -28,11 +30,28 @@ class ResponsePanel(QWidget):
     (userul a semnalat asta ca fiind neclar). citeste BlockManager
     periodic (QTimer, ruleaza pe thread-ul UI) in loc sa fie notificata
     direct din threading.Timer-ul de expirare, care ruleaza pe alt thread
-    - widget-urile Qt nu pot fi atinse decat din thread-ul UI"""
+    - widget-urile Qt nu pot fi atinse decat din thread-ul UI.
 
-    def __init__(self, block_manager: BlockManager) -> None:
+    + comutator pentru blocarea automata (DashboardPanel citeste
+    ResponseSettings live, la fiecare tick ML - vezi _maybe_auto_block)"""
+
+    def __init__(self, block_manager: BlockManager, response_settings: ResponseSettings) -> None:
         super().__init__()
         self._block_manager = block_manager
+        self._settings = response_settings
+
+        self._auto_block_checkbox = QCheckBox(
+            "blocare automata (doar cand ambele modele ML sunt de acord)"
+        )
+        self._auto_block_checkbox.setChecked(response_settings.auto_block_enabled)
+        self._auto_block_checkbox.setToolTip(
+            "cand e bifat, o conexiune pe care ambele modele o considera "
+            "atac (incredere mare) e blocata automat, fara confirmare "
+            "manuala - tot temporar si reversibil, ca orice blocare. "
+            "semnaturile (port scan, porturi sensibile) NU declanseaza "
+            "blocare automata, doar evenimentele ML"
+        )
+        self._auto_block_checkbox.toggled.connect(self._on_auto_block_toggled)
 
         self._table = QTableWidget(0, len(_ACTIVE_COLUMNS))
         self._table.setHorizontalHeaderLabels(_ACTIVE_COLUMNS)
@@ -56,6 +75,7 @@ class ResponsePanel(QWidget):
         self._history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(self._auto_block_checkbox)
         layout.addLayout(button_bar)
         layout.addWidget(self._table)
         layout.addWidget(QLabel("Istoric blocari (aceasta sesiune):"))
@@ -65,6 +85,9 @@ class ResponsePanel(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(_REFRESH_INTERVAL_MS)
+
+    def _on_auto_block_toggled(self, checked: bool) -> None:
+        self._settings.auto_block_enabled = checked
 
     def _refresh(self) -> None:
         blocks = self._block_manager.active_blocks()

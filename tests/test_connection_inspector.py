@@ -77,6 +77,31 @@ def test_dialog_shows_expert_feature_table():
     dialog.deleteLater()
 
 
+def test_dialog_shows_anomaly_score_when_local_model_active():
+    _app()
+    local_manager = LocalModelManager(min_training_samples=5)
+    for _ in range(5):
+        local_manager.process(make_record())
+
+    assessment = assess_connection(make_record(), expert=None, local_manager=local_manager)
+    dialog = ConnectionInspectorDialog(assessment)
+
+    assert "scor anomalie" in _all_label_text(dialog)
+    dialog.deleteLater()
+
+
+def test_dialog_omits_anomaly_score_while_learning():
+    _app()
+    local_manager = LocalModelManager(min_training_samples=1000)
+    local_manager.process(make_record())
+
+    assessment = assess_connection(make_record(), expert=None, local_manager=local_manager)
+    dialog = ConnectionInspectorDialog(assessment)
+
+    assert "scor anomalie" not in _all_label_text(dialog)
+    dialog.deleteLater()
+
+
 def test_dialog_shows_categorical_rarity_table():
     _app()
     local_manager = LocalModelManager(min_training_samples=5)

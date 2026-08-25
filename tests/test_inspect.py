@@ -82,8 +82,20 @@ def test_assess_with_active_local_manager_returns_full_picture():
 
     assert result.local_is_learning is False
     assert result.local_prediction in (0, 1)
+    assert result.local_anomaly_score is not None
+    assert isinstance(result.local_anomaly_score, float)
     assert result.expert_top_features != []
     assert result.explanation != ""
+
+
+def test_assess_with_learning_local_manager_has_no_anomaly_score():
+    expert = _tiny_expert_model()
+    local_manager = LocalModelManager(min_training_samples=1000)
+    local_manager.process(make_record())
+
+    result = assess_connection(make_record(), expert=expert, local_manager=local_manager)
+
+    assert result.local_anomaly_score is None
 
 
 def test_assess_does_not_mutate_local_manager_state():
@@ -114,10 +126,26 @@ def test_assessment_json_round_trip_preserves_everything():
     assert restored.expert_top_features == original.expert_top_features
     assert restored.local_prediction == original.local_prediction
     assert restored.local_is_learning == original.local_is_learning
+    assert restored.local_anomaly_score == original.local_anomaly_score
     assert restored.local_deviations == original.local_deviations
     assert restored.local_categorical_rarities == original.local_categorical_rarities
     assert restored.event_type == original.event_type
     assert restored.explanation == original.explanation
+
+
+def test_assessment_from_json_handles_missing_score_key():
+    """compatibilitate cu assessment_json salvat inainte de introducerea
+    scorului continuu - fara cheia noua, nu trebuie sa arunce KeyError"""
+    import json
+
+    payload = json.loads(
+        assessment_to_json(assess_connection(make_record(), expert=None, local_manager=None))
+    )
+    del payload["local_anomaly_score"]
+
+    restored = assessment_from_json(json.dumps(payload))
+
+    assert restored.local_anomaly_score is None
 
 
 def test_assessment_json_round_trip_without_models():

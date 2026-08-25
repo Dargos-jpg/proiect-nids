@@ -2,7 +2,7 @@ import sqlite3
 from datetime import datetime
 
 from nids.core.event import Event, Severity
-from nids.storage.event_store import EventStore
+from nids.storage.event_store import DEFAULT_DISPLAY_LIMIT, EventStore
 
 
 def _event(source_ip: str = "10.0.0.1") -> Event:
@@ -57,6 +57,12 @@ def test_recent_respects_limit(tmp_path):
         store.save(_event())
 
     assert len(store.recent(limit=3)) == 3
+
+
+def test_default_display_limit_is_2000():
+    """regresie: userul a semnalat ca 200 (limita veche) e prea putin -
+    tabelul din Loguri arata doar afisarea, DB-ul pastreaza totul oricum"""
+    assert DEFAULT_DISPLAY_LIMIT == 2000
 
 
 def test_persists_across_reopen(tmp_path):

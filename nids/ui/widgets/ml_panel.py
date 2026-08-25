@@ -135,6 +135,19 @@ class MlPanel(QWidget):
         contamination_row.addWidget(self._contamination_spin)
         form.addRow("Sensibilitate anomalii:", contamination_row)
 
+        n_estimators = QSpinBox()
+        n_estimators.setRange(10, 500)
+        n_estimators.setSingleStep(10)
+        n_estimators.setValue(self._settings.n_estimators)
+        n_estimators.setToolTip(
+            "numarul de arbori din Isolation Forest - mai multi arbori dau "
+            "scoruri de anomalie mai stabile (mai putina varianta intre "
+            "reantrenari succesive), cu cost mai mare la antrenare. 100 e "
+            "implicitul sklearn"
+        )
+        n_estimators.valueChanged.connect(self._on_n_estimators_changed)
+        form.addRow("Numar de arbori (n_estimators):", n_estimators)
+
         strict = QCheckBox("raporteaza doar cand ambele modele sunt de acord")
         strict.setChecked(self._settings.strict_reporting)
         strict.setToolTip(
@@ -171,6 +184,9 @@ class MlPanel(QWidget):
     def _on_contamination_changed(self, value: float) -> None:
         if not self._auto_contamination.isChecked():
             self._settings.contamination = value
+
+    def _on_n_estimators_changed(self, value: int) -> None:
+        self._settings.n_estimators = value
 
     def _on_strict_reporting_toggled(self, checked: bool) -> None:
         self._settings.strict_reporting = checked

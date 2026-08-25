@@ -62,6 +62,7 @@ def test_start_monitoring_applies_configured_ml_settings(tmp_path, monkeypatch):
         retrain_every=13,
         max_buffer_size=444,
         contamination=0.15,
+        n_estimators=50,
         strict_reporting=True,
         evaluation_interval_ms=2000,
     )
@@ -75,6 +76,7 @@ def test_start_monitoring_applies_configured_ml_settings(tmp_path, monkeypatch):
     assert manager._retrain_every == 13
     assert manager._max_buffer_size == 444
     assert manager._contamination == 0.15
+    assert manager._n_estimators == 50
     assert panel._ml_timer.interval() == 2000
 
     panel._stop_monitoring()
@@ -90,6 +92,7 @@ def test_start_monitoring_with_default_settings_matches_previous_behavior(tmp_pa
     assert panel._live_hybrid._strict_reporting is False
     manager = panel._live_hybrid.local_manager
     assert manager._contamination is None
+    assert manager._n_estimators == 100
     assert panel._ml_timer.interval() == 5000
 
     panel._stop_monitoring()

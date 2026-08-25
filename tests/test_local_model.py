@@ -62,3 +62,47 @@ def test_local_model_train_defaults_to_auto_contamination():
     model = LocalModel.train(_normal_records())
 
     assert model._model.contamination == "auto"
+
+
+def test_anomaly_score_is_higher_for_clear_outlier():
+    model = LocalModel.train(_normal_records(60))
+    normal = make_record(src_bytes=200, dst_bytes=1000)
+    outlier = make_record(
+        src_bytes=500_000,
+        dst_bytes=0,
+        count=200,
+        srv_count=200,
+        service="private",
+        flag="S0",
+        serror_rate=1.0,
+    )
+
+    scores = model.anomaly_score([normal, outlier])
+
+    assert scores[1] > scores[0]
+
+
+def test_anomaly_score_empty_input():
+    model = LocalModel.train(_normal_records())
+
+    assert model.anomaly_score([]) == []
+
+
+def test_local_model_train_accepts_custom_n_estimators():
+    model = LocalModel.train(_normal_records(), n_estimators=50)
+
+    assert model._model.n_estimators == 50
+
+
+def test_local_model_train_defaults_to_100_estimators():
+    model = LocalModel.train(_normal_records())
+
+    assert model._model.n_estimators == 100
+
+
+def test_anomaly_score_returns_native_floats():
+    model = LocalModel.train(_normal_records())
+
+    scores = model.anomaly_score([make_record()])
+
+    assert isinstance(scores[0], float)

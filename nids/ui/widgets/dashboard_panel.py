@@ -23,7 +23,9 @@ from nids.core.event import Event, Severity
 from nids.core.hybrid_analysis import analyze_pcap_hybrid
 from nids.core.inspect import ConnectionAssessment, assess_connection, assessment_from_json
 from nids.core.live_hybrid import LiveHybridAnalyzer
+from nids.core.ml_combination import BOTH_ATTACK_EVENT_TYPE
 from nids.core.ml_settings import MlSettings
+from nids.core.response_settings import ResponseSettings
 from nids.ml.expert.model import ExpertModel
 from nids.ml.features.nsl_kdd_style import NslKddStyleFeatures, extract_nsl_kdd_style_features
 from nids.ml.local.learning import LocalModelManager
@@ -61,6 +63,7 @@ class DashboardPanel(QWidget):
         traffic_panel: TrafficPanel,
         logs_panel: LogsPanel,
         ml_settings: MlSettings | None = None,
+        response_settings: ResponseSettings | None = None,
     ) -> None:
         super().__init__()
         self._block_manager = block_manager
@@ -71,6 +74,9 @@ class DashboardPanel(QWidget):
         self._logs_panel = logs_panel
         self._logs_panel.analyze_requested.connect(self._on_log_analyze_requested)
         self._ml_settings = ml_settings if ml_settings is not None else MlSettings()
+        self._response_settings = (
+            response_settings if response_settings is not None else ResponseSettings()
+        )
 
         self._status_label = QLabel("niciun fisier incarcat")
 
@@ -208,6 +214,7 @@ class DashboardPanel(QWidget):
             retrain_every=self._ml_settings.retrain_every,
             max_buffer_size=self._ml_settings.max_buffer_size,
             contamination=self._ml_settings.contamination,
+            n_estimators=self._ml_settings.n_estimators,
         )
         self._live_hybrid = LiveHybridAnalyzer(
             self._expert_model, local_manager, strict_reporting=self._ml_settings.strict_reporting
@@ -316,7 +323,59 @@ class DashboardPanel(QWidget):
         events = self._live_hybrid.evaluate()
         for event in events:
             self._traffic_chart.record_event(event.severity)
+            self._maybe_auto_block(event)
         self._append_events(events)
+
+    def _maybe_auto_block(self, event: Event) -> None:
+        """raspuns automat, opt-in (vezi CONTEXT-nids.md, "nivel de
+        raspuns" - era in plan de la inceput, doar neimplementat). declanseaza
+        DOAR pe BOTH_ATTACK (ambele modele de acord) - cel mai increzator
+        caz, indiferent de strict_reporting (BOTH_ATTACK trece oricum de
+        acel filtru). citit live, nu doar la pornirea monitorizarii - poate
+        fi pornit/oprit din Raspuns in mijlocul unei sesiuni active.
+        idempotent: block() nu face nimic daca IP-ul e deja blocat, iar
+        verificarea is_blocked() de mai jos evita sa umplem Loguri cu
+        acelasi "blocare automata" la fiecare conexiune noua de la acelasi IP"""
+        if not self._response_settings.auto_block_enabled:
+            return
+        if event.event_type != BOTH_ATTACK_EVENT_TYPE:
+            return
+        if self._block_manager.is_blocked(event.source_ip):
+            return
+
+        try:
+            self._block_manager.block(
+                event.source_ip, reason=f"blocare automata: {event.description}"
+            )
+        except BlockRuleError as exc:
+            self._status_label.setText(
+                f"{exc} - blocare automata esuata, ruleaza aplicatia ca Administrator"
+            )
+            self._event_store.save(
+                Event(
+                    event_type="blocare automata esuata",
+                    source_ip=event.source_ip,
+                    severity=Severity.LOW,
+                    description=f"{exc} - probabil lipsesc drepturile de Administrator",
+                )
+            )
+            return
+
+        self._event_store.save(
+            Event(
+                event_type="blocare automata",
+                source_ip=event.source_ip,
+                severity=Severity.LOW,
+                description=(
+                    f"blocat automat - ambele modele de acord: {event.description}"
+                ),
+                dest_ip=event.dest_ip,
+                src_port=event.src_port,
+                dest_port=event.dest_port,
+                protocol=event.protocol,
+                assessment_json=event.assessment_json,
+            )
+        )
 
     def _on_thread_finished(self) -> None:
         self._thread = None

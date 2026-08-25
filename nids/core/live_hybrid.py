@@ -70,9 +70,15 @@ class LiveHybridAnalyzer:
             self._evaluated_connections.add(_connection_key(record))
 
             local_pred = self.local_manager.process(record)
+            local_score = self.local_manager.anomaly_score(record)
             agreement = combine_predictions(expert_pred, local_pred)
             event = event_for_agreement(
-                agreement, record.src_ip, record.dst_ip, expert_pred, strict=self._strict_reporting
+                agreement,
+                record.src_ip,
+                record.dst_ip,
+                expert_pred,
+                strict=self._strict_reporting,
+                local_anomaly_score=local_score,
             )
             if event is not None:
                 event.dest_ip = record.dst_ip
@@ -95,6 +101,7 @@ class LiveHybridAnalyzer:
                     expert_top_features=expert_features,
                     local_prediction=local_pred,
                     local_is_learning=self.local_manager.is_learning,
+                    local_anomaly_score=local_score,
                     local_deviations=local_deviations,
                     local_categorical_rarities=local_rarities,
                     agreement=agreement,

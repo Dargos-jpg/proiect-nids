@@ -398,6 +398,120 @@ Trafic doar ca sa deschida analiza ML.
     flagata din nou, mai tarziu) e de fapt exact semnalul temporal util
     userului ("era flagged si data trecuta?"), nu risipa
 
+## raspuns automat (nivelul din CONTEXT-nids.md ramas neimplementat)
+
+CONTEXT-nids.md prevedea de la inceput doua niveluri de raspuns: "automat,
+dar strict safe/reversibil" SI "manual, human-in-the-loop" - doar cel
+manual fusese construit. user a observat lipsa si a cerut explicit optiunea.
+
+decizii (confirmate cu userul, nu presupuse):
+- prag FIX: doar BOTH_ATTACK (ambele modele de acord) - cel mai increzator
+  caz, indiferent de strict_reporting (BOTH_ATTACK trece oricum de acel
+  filtru, deci nu exista interactiune ciudata intre cele doua setari)
+- DOAR evenimente ML - semnaturile (port scan, porturi sensibile) raman
+  strict manuale, au o rata de fals-pozitiv cunoscuta si diferita
+- dezactivat implicit (opt-in) - blocarea, chiar temporara/reversibila,
+  e o actiune reala, nu ceva ce ar trebui sa surprinda userul din prima
+  pornire
+
+implementare:
+- `nids/core/response_settings.py` (nou) - `ResponseSettings`, acelasi
+  tipar ca `MlSettings` (dataclass simplu, nu widget, creat o data in
+  MainWindow, dat la DashboardPanel si ResponsePanel) - dar SPRE DEOSEBIRE
+  de MlSettings, citit LIVE la fiecare tick ML, nu doar la pornirea
+  monitorizarii - poti porni/opri din Raspuns in mijlocul unei sesiuni
+  active, fara sa fie nevoie de restart
+- `ml_combination.BOTH_ATTACK_EVENT_TYPE` - constanta publica (event_type-ul
+  exact folosit de describe_agreement() pentru BOTH_ATTACK), ca
+  DashboardPanel sa aiba un criteriu stabil de verificat fara sa
+  duplice logica de combinare sau sa lege Event de enum-ul Agreement
+- `DashboardPanel._maybe_auto_block()` - apelata din `_on_ml_evaluation_tick()`
+  pentru fiecare eveniment nou. verifica in ordine: setarea e activa? e
+  BOTH_ATTACK? IP-ul e deja blocat? (idempotenta - evita sa umple Loguri
+  cu acelasi "blocare automata" la fiecare conexiune noua de la un IP deja
+  blocat). apoi block_manager.block(), cu acelasi tratament de
+  BlockRuleError ca la blocarea manuala (mesaj clar, "blocare automata
+  esuata" in Loguri, nu crash) - reutilizeaza tot ce a fost construit
+  pentru bug-ul de blocare fara drepturi de Administrator
+  - evenimentul "blocare automata" mosteneste dest_ip/porturi/protocol/
+    assessment_json de la evenimentul ML original - analizabil din Loguri,
+    la fel ca "blocare manuala"
+- `ResponsePanel` are acum un checkbox "blocare automata" langa tabelul
+  de blocari active, legat direct de ResponseSettings
+
+## limita de afisare din Loguri: 200 -> 2000
+
+user a intrebat daca n-ar trebui sa "tinem minte" mai mult in Loguri
+(comparativ cu limita de 500 din Trafic). clarificare importanta: DB-ul
+(data/nids.db) NU sterge NICIODATA nimic - "limita" era doar cate randuri
+se AFISEAZA (EventStore.recent()/events_for_source(), query SQL cu
+LIMIT), nu ce se pastreaza. la fel la Trafic - `_all_packets` (folosit
+pentru reanaliza ML) creste nelimitat, doar tabelul VIZIBIL e capat la
+500 pentru performanta randare.
+
+de ce nu literalmente "toate": LogsPanel reconstruieste tot tabelul din
+SQLite la fiecare 2 secunde (interogare noua + toate celulele recreate) -
+la un numar nelimitat, dupa saptamani de utilizare cu multe evenimente,
+reconstructia asta ar putea incepe sa incetineasca UI-ul vizibil.
+
+fix: `EventStore.DEFAULT_DISPLAY_LIMIT` (nou, 2000, inlocuieste 200-ul
+hardcodat din semnaturile `recent()`/`events_for_source()`) - generos
+pentru utilizare normala, fara riscul de incetinire al lui "fara limita".
+export-ul HTML ramane la 10 000 (deja seta explicit acest limit, neafectat).
+
+## modelul local, faza 2: scor continuu + hyperparametri + investigatie stabilitate
+
+user a observat 89 de evenimente in 5 minute (toate "doar model local") si
+a cerut explicit sa facem modelul local "mai complex". trei imbunatatiri,
+in ordinea ceruta:
+
+1. **scor continuu de anomalie** (nu doar binarul anomalie/normal):
+   - `LocalModel.anomaly_score()` - inversul lui `decision_function()` din
+     sklearn (conventie proprie: mai mare = mai anormal, spre deosebire de
+     sklearn unde negativ = anomalie)
+   - `LocalModelManager.anomaly_score()` - la fel ca `predict_only()`,
+     None cat timp modelul e in modul invatare
+   - `ml_combination.severity_from_local_score()` - 3 praguri euristice
+     (usor/moderat/sever la 0.05/0.15) - NU calibrate statistic (Isolation
+     Forest n-are o scala universala intre seturi de date), doar o
+     impartire rezonabila. `event_for_agreement()` foloseste asta pentru
+     BOTH_ATTACK/LOCAL_ONLY (singurele cazuri unde modelul local a
+     confirmat un semnal) - inainte, orice flag local era mereu HIGH,
+     acum severitatea reflecta cat de departe e conexiunea de "normal"
+   - `ConnectionAssessment.local_anomaly_score` + afisat in
+     ConnectionInspectorDialog ("scor anomalie: +0.180, sever")
+   - inclus in assessment_json (backward compatibil - `.get()` cu default
+     None pentru evenimente vechi, salvate inainte de acest camp)
+
+2. **n_estimators configurabil** (numarul de arbori Isolation Forest) -
+   nou camp `MlSettings.n_estimators`, implicit 100 (exact valoarea
+   implicita sklearn - niciun comportament schimbat pana nu il ajusteaza
+   userul manual). plumbing: LocalModel.train() -> LocalModelManager
+   (stocat, folosit la fiecare _retrain()) -> UI. NU am schimbat
+   `max_samples` (ramane 'auto' = min(256, n)) - e deja practica
+   recomandata din lucrarea originala Isolation Forest, fara un motiv
+   concret sa se abata de la ea
+
+3. **investigatie stabilitate feature-uri de trafic** - concluzie: NU e
+   un bug de cod. `extract_nsl_kdd_style_features()` creeaza un
+   `TrafficWindowTracker()` nou la fiecare tick (5s) si reproceseaza TOATE
+   pachetele sesiunii in ordine cronologica - fereastra e recalculata
+   corect si consistent "ca acum", nu e stale/instabila intre tick-uri.
+
+   motivul REAL al zgomotului: o conexiune e evaluata O SINGURA DATA, la
+   tick-ul unde apare prima oara ca "noua" - daca la momentul respectiv
+   conexiunea abia a inceput (doar 1-2 pachete vazute), `duration≈0`,
+   `src_bytes` minim, `flag="S0"` (fara raspuns inca) - vezi
+   nids/ml/features/connection.py::_build_connection(). traficul de
+   simulare (butonul "Simuleaza port scan") genereaza EXACT acest profil
+   (conexiuni TCP scurte, adesea fara raspuns) - structural identic cu ce
+   ar arata un SYN flood real (neptune in NSL-KDD). deci modelul local
+   flagheaza CORECT ceva structural diferit de traficul normal complet
+   (SF, durata reala, octeti reali) - nu e o eroare de calcul, e
+   comportamentul asteptat al unui detector de anomalii pe trafic
+   deliberat anormal (chiar daca "safe"). nicio schimbare de cod aici -
+   parghiile reale raman cele din faza 1 (strict mode, contamination)
+
 ## panoul ML a devenit configurabil (userul a cerut explicit "mai complex, mai customizable")
 
 focusul e pe modelul local - cel expert e deja pre-antrenat static, nimic

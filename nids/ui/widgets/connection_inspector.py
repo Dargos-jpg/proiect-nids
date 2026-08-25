@@ -10,13 +10,23 @@ from PySide6.QtWidgets import (
 )
 
 from nids.core.inspect import ConnectionAssessment
+from nids.core.ml_combination import severity_from_local_score
 from nids.ml.features.nsl_kdd_style import to_feature_frame
+
+_SEVERITY_LABEL = {"scazuta": "usor", "medie": "moderat", "ridicata": "sever"}
 
 
 def _verdict_label(prediction: int | None) -> str:
     if prediction is None:
         return "indisponibil"
     return "ATAC/ANOMALIE" if prediction == 1 else "normal"
+
+
+def _score_label(score: float | None) -> str:
+    if score is None:
+        return ""
+    grade = _SEVERITY_LABEL[severity_from_local_score(score).value]
+    return f" (scor anomalie: {score:+.3f}, {grade})"
 
 
 def _make_table(headers: list[str], rows: list[tuple]) -> QTableWidget:
@@ -55,7 +65,7 @@ class ConnectionInspectorDialog(QDialog):
         local_verdict = (
             "inca invata"
             if assessment.local_is_learning
-            else _verdict_label(assessment.local_prediction)
+            else _verdict_label(assessment.local_prediction) + _score_label(assessment.local_anomaly_score)
         )
         verdict = QLabel(
             f"Model expert: {_verdict_label(assessment.expert_prediction)}"

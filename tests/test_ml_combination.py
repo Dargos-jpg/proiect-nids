@@ -4,6 +4,7 @@ from nids.core.ml_combination import (
     combine_predictions,
     describe_agreement,
     event_for_agreement,
+    severity_from_local_score,
 )
 
 
@@ -104,6 +105,62 @@ def test_non_strict_mode_unchanged_by_default():
     event = event_for_agreement(Agreement.EXPERT_ONLY, "1.1.1.1", "2.2.2.2", 1)
 
     assert event is not None
+
+
+def test_severity_from_local_score_thresholds():
+    assert severity_from_local_score(0.2) == Severity.HIGH
+    assert severity_from_local_score(0.15) == Severity.HIGH
+    assert severity_from_local_score(0.10) == Severity.MEDIUM
+    assert severity_from_local_score(0.05) == Severity.MEDIUM
+    assert severity_from_local_score(0.0) == Severity.LOW
+    assert severity_from_local_score(-0.1) == Severity.LOW
+
+
+def test_local_only_severity_graded_by_score():
+    mild = event_for_agreement(
+        Agreement.LOCAL_ONLY, "1.1.1.1", "2.2.2.2", 0, local_anomaly_score=0.01
+    )
+    severe = event_for_agreement(
+        Agreement.LOCAL_ONLY, "1.1.1.1", "2.2.2.2", 0, local_anomaly_score=0.3
+    )
+
+    assert mild.severity == Severity.LOW
+    assert severe.severity == Severity.HIGH
+
+
+def test_both_attack_severity_graded_by_score():
+    event = event_for_agreement(
+        Agreement.BOTH_ATTACK, "1.1.1.1", "2.2.2.2", 1, local_anomaly_score=0.02
+    )
+
+    assert event.severity == Severity.LOW
+
+
+def test_local_only_without_score_keeps_fixed_severity():
+    """comportamentul vechi (fara scor) trebuie sa ramana neschimbat -
+    userii/apelurile care nu paseaza scorul (ex: PCAP hybrid) nu trebuie
+    afectate de aceasta schimbare"""
+    event = event_for_agreement(Agreement.LOCAL_ONLY, "1.1.1.1", "2.2.2.2", 0)
+
+    assert event.severity == Severity.HIGH
+
+
+def test_expert_only_severity_unaffected_by_score():
+    """EXPERT_ONLY nu are un scor local de gradat - modelul local a zis
+    "normal", nu exista niciun semnal local de anomalie de folosit"""
+    event = event_for_agreement(
+        Agreement.EXPERT_ONLY, "1.1.1.1", "2.2.2.2", 1, local_anomaly_score=0.3
+    )
+
+    assert event.severity == Severity.MEDIUM
+
+
+def test_local_learning_severity_unaffected_by_score():
+    event = event_for_agreement(
+        Agreement.LOCAL_LEARNING, "1.1.1.1", "2.2.2.2", 1, local_anomaly_score=0.3
+    )
+
+    assert event.severity == Severity.MEDIUM
 
 
 def test_describe_agreement_matches_event_for_agreement_text():

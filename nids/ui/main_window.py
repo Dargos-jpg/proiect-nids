@@ -2,6 +2,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QMainWindow
 
 from nids.core.ml_settings import MlSettings
+from nids.core.response_settings import ResponseSettings
 from nids.response.block import add_block_rule, remove_block_rule
 from nids.response.manager import BlockManager
 from nids.storage.event_store import EventStore
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
         self._traffic_panel = TrafficPanel()
         self._logs_panel = LogsPanel(self._event_store)
         self._ml_settings = MlSettings()
+        self._response_settings = ResponseSettings()
 
         # zona centrala, ca "Scene" in Unity - vederea principala de lucru
         self._dashboard = DashboardPanel(
@@ -37,6 +39,7 @@ class MainWindow(QMainWindow):
             self._traffic_panel,
             self._logs_panel,
             self._ml_settings,
+            self._response_settings,
         )
         self.setCentralWidget(self._dashboard)
 
@@ -61,7 +64,7 @@ class MainWindow(QMainWindow):
         )
         self._add_dock(
             "Raspuns",
-            ResponsePanel(self._block_manager),
+            ResponsePanel(self._block_manager, self._response_settings),
             Qt.DockWidgetArea.RightDockWidgetArea,
             tabify_with="Semnaturi",
             min_width=right_dock_min_width,

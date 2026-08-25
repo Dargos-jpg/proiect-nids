@@ -80,6 +80,24 @@ def test_retrain_defaults_to_auto_contamination():
     assert manager._model._model.contamination == "auto"
 
 
+def test_retrain_uses_configured_n_estimators():
+    manager = LocalModelManager(min_training_samples=5, n_estimators=30)
+
+    for _ in range(5):
+        manager.process(make_record())
+
+    assert manager._model._model.n_estimators == 30
+
+
+def test_retrain_defaults_to_100_estimators():
+    manager = LocalModelManager(min_training_samples=5)
+
+    for _ in range(5):
+        manager.process(make_record())
+
+    assert manager._model._model.n_estimators == 100
+
+
 def test_save_before_training_raises():
     manager = LocalModelManager(min_training_samples=10)
 
@@ -118,6 +136,45 @@ def test_load_or_new_falls_back_when_nothing_saved(tmp_path):
 
     assert manager.is_learning is True
     assert manager.samples_collected == 0
+
+
+def test_anomaly_score_returns_none_while_learning():
+    manager = LocalModelManager(min_training_samples=5)
+    manager.process(make_record())
+
+    assert manager.anomaly_score(make_record()) is None
+
+
+def test_anomaly_score_returns_float_once_active():
+    manager = LocalModelManager(min_training_samples=5)
+    for _ in range(5):
+        manager.process(make_record())
+
+    assert isinstance(manager.anomaly_score(make_record()), float)
+
+
+def test_anomaly_score_does_not_mutate_buffer():
+    manager = LocalModelManager(min_training_samples=5)
+    for _ in range(5):
+        manager.process(make_record())
+    collected_before = manager.samples_collected
+
+    manager.anomaly_score(make_record())
+
+    assert manager.samples_collected == collected_before
+
+
+def test_anomaly_score_higher_for_outlier():
+    manager = LocalModelManager(min_training_samples=10)
+    for src_bytes in (190, 195, 200, 205, 210, 195, 200, 205, 190, 210):
+        manager.process(make_record(src_bytes=src_bytes))
+
+    normal_score = manager.anomaly_score(make_record(src_bytes=200))
+    outlier_score = manager.anomaly_score(
+        make_record(src_bytes=500_000, count=200, srv_count=200, flag="S0", serror_rate=1.0)
+    )
+
+    assert outlier_score > normal_score
 
 
 def test_predict_only_returns_none_while_learning():
