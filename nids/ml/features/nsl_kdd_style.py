@@ -41,9 +41,12 @@ class NslKddStyleFeatures:
     dst_host_srv_serror_rate: float
     dst_host_rerror_rate: float
     dst_host_srv_rerror_rate: float
-    # identificare - nu e feature ML, util pentru afisare/debugging
+    # identificare - nu e feature ML, util pentru afisare/debugging si
+    # pentru identitatea completa a conexiunii (ex: deduplicare la ML live)
     src_ip: str
     dst_ip: str
+    src_port: int | None
+    dst_port: int | None
 
 
 def extract_nsl_kdd_style_features(packets: list[PacketMeta]) -> list[NslKddStyleFeatures]:
@@ -91,19 +94,24 @@ def _combine(conn: ConnectionFeatures, traffic: TrafficWindowFeatures) -> NslKdd
         dst_host_srv_rerror_rate=traffic.dst_host_srv_rerror_rate,
         src_ip=conn.src_ip,
         dst_ip=conn.dst_ip,
+        src_port=conn.src_port,
+        dst_port=conn.dst_port,
     )
 
 
 def to_feature_frame(records: list[NslKddStyleFeatures]) -> pd.DataFrame:
     """converteste in DataFrame-ul brut (neencodat) pe care il asteapta
-    nids.ml.expert.nsl_kdd.encode_features - exclude src_ip/dst_ip
-    (identificare, nu feature) si converteste land din bool in int, ca
-    in coloana originala NSL-KDD"""
+    nids.ml.expert.nsl_kdd.encode_features - exclude campurile de
+    identificare (src_ip/dst_ip/src_port/dst_port - nu sunt features,
+    "service" deja capteaza semnalul relevant al portului) si converteste
+    land din bool in int, ca in coloana originala NSL-KDD"""
     rows = []
     for r in records:
         row = asdict(r)
         del row["src_ip"]
         del row["dst_ip"]
+        del row["src_port"]
+        del row["dst_port"]
         row["land"] = int(row["land"])
         rows.append(row)
     return pd.DataFrame(rows)

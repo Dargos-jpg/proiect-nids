@@ -24,3 +24,19 @@ def test_analyze_pcap_hybrid_normal_traffic_has_no_port_scan():
     events = analyze_pcap_hybrid(str(PCAP_PATH), expert)
 
     assert not any(e.event_type == "port scan" for e in events)
+
+
+def test_analyze_pcap_hybrid_flags_sensitive_port_contact():
+    expert = ExpertModel.load()
+
+    events = analyze_pcap_hybrid(str(PCAP_PATH), expert, sensitive_ports={80})
+
+    assert any(e.event_type == "contact port sensibil" for e in events)
+
+
+def test_analyze_pcap_hybrid_accepts_port_scan_window():
+    expert = ExpertModel.load()
+
+    events = analyze_pcap_hybrid(str(PCAP_PATH), expert, port_scan_window=5.0)
+
+    assert not any(e.event_type == "port scan" for e in events)

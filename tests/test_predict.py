@@ -6,8 +6,9 @@ from sklearn.ensemble import RandomForestClassifier
 from nids.capture.pcap_reader import read_pcap
 from nids.ml.expert.model import ExpertModel
 from nids.ml.expert.nsl_kdd import FEATURE_COLUMNS, prepare_features
-from nids.ml.expert.predict import predict_connections
+from nids.ml.expert.predict import explain_connection, predict_connections
 from nids.ml.features.nsl_kdd_style import extract_nsl_kdd_style_features
+from tests.factories import make_record
 
 PCAP_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / "http.cap"
 _KDD_COLUMNS = FEATURE_COLUMNS + ["label", "difficulty"]
@@ -52,3 +53,28 @@ def test_predict_connections_on_empty_input():
     expert = _tiny_expert_model()
 
     assert predict_connections(expert, []) == []
+
+
+def test_explain_connection_returns_features_with_values():
+    expert = _tiny_expert_model()
+    record = make_record(src_bytes=200, dst_bytes=2000, service="http", flag="SF")
+
+    contributions = explain_connection(expert, record, top_n=5)
+
+    assert len(contributions) <= 5
+    assert len(contributions) > 0
+    # sortate descrescator dupa importanta
+    importances = [c.importance for c in contributions]
+    assert importances == sorted(importances, reverse=True)
+    # coloanele one-hot sunt grupate inapoi la numele original
+    assert all(c.feature in FEATURE_COLUMNS for c in contributions)
+
+
+def test_explain_connection_value_matches_record():
+    expert = _tiny_expert_model()
+    record = make_record(src_bytes=777)
+
+    contributions = explain_connection(expert, record, top_n=28)
+
+    src_bytes_contribution = next(c for c in contributions if c.feature == "src_bytes")
+    assert src_bytes_contribution.value == "777"

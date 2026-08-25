@@ -1,9 +1,17 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QMainWindow
 
+from nids.core.ml_settings import MlSettings
+from nids.response.block import add_block_rule, remove_block_rule
+from nids.response.manager import BlockManager
+from nids.storage.event_store import EventStore
 from nids.ui.theme import DARK_STYLESHEET
-from nids.ui.widgets.common import placeholder_widget
 from nids.ui.widgets.dashboard_panel import DashboardPanel
+from nids.ui.widgets.logs_panel import LogsPanel
+from nids.ui.widgets.ml_panel import MlPanel
+from nids.ui.widgets.response_panel import ResponsePanel
+from nids.ui.widgets.signatures_panel import SignaturesPanel
+from nids.ui.widgets.traffic_panel import TrafficPanel
 
 
 class MainWindow(QMainWindow):
@@ -14,8 +22,22 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(DARK_STYLESHEET)
         self.setDockNestingEnabled(True)
 
+        self._block_manager = BlockManager(add_rule=add_block_rule, remove_rule=remove_block_rule)
+        self._event_store = EventStore()
+        self._signatures_panel = SignaturesPanel()
+        self._traffic_panel = TrafficPanel()
+        self._logs_panel = LogsPanel(self._event_store)
+        self._ml_settings = MlSettings()
+
         # zona centrala, ca "Scene" in Unity - vederea principala de lucru
-        self._dashboard = DashboardPanel()
+        self._dashboard = DashboardPanel(
+            self._block_manager,
+            self._event_store,
+            self._signatures_panel,
+            self._traffic_panel,
+            self._logs_panel,
+            self._ml_settings,
+        )
         self.setCentralWidget(self._dashboard)
 
         # latime minima ca sa incapa toate etichetele din tab-bar-ul
@@ -26,31 +48,39 @@ class MainWindow(QMainWindow):
         self._docks: dict[str, QDockWidget] = {}
         self._add_dock(
             "Semnaturi",
-            placeholder_widget("semnaturi - in lucru"),
+            self._signatures_panel,
             Qt.DockWidgetArea.RightDockWidgetArea,
             min_width=right_dock_min_width,
         )
         self._add_dock(
             "ML",
-            placeholder_widget("ML - in lucru"),
+            MlPanel(self._dashboard, self._ml_settings),
             Qt.DockWidgetArea.RightDockWidgetArea,
             tabify_with="Semnaturi",
             min_width=right_dock_min_width,
         )
         self._add_dock(
             "Raspuns",
-            placeholder_widget("raspuns - in lucru"),
+            ResponsePanel(self._block_manager),
             Qt.DockWidgetArea.RightDockWidgetArea,
             tabify_with="Semnaturi",
             min_width=right_dock_min_width,
         )
         self._add_dock(
             "Loguri",
-            placeholder_widget("loguri - in lucru"),
+            self._logs_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
             min_height=120,
         )
+        self._add_dock(
+            "Trafic",
+            self._traffic_panel,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+            tabify_with="Loguri",
+            min_height=120,
+        )
         self._docks["Semnaturi"].raise_()
+        self._docks["Loguri"].raise_()
 
         self.resizeDocks(
             [self._docks["Semnaturi"]], [320], Qt.Orientation.Horizontal
@@ -93,5 +123,12 @@ class MainWindow(QMainWindow):
             view_menu.addAction(action)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - override Qt
-        self._dashboard.stop_monitoring()
+        self._dashboard.shutdown()
+        # opreste timer-ul de refresh al LogsPanel INAINTE de a inchide
+        # EventStore - altfel un refresh programat mai poate ruleaza dupa
+        # close() si loveste o conexiune SQLite inchisa (bug real gasit
+        # de user: sqlite3.ProgrammingError: Cannot operate on a closed database)
+        self._logs_panel.stop()
+        self._block_manager.shutdown()
+        self._event_store.close()
         super().closeEvent(event)

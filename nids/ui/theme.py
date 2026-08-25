@@ -94,4 +94,38 @@ QListWidget::item {
 QListWidget::item:selected {
     background-color: #094771;
 }
+
+QTableWidget {
+    background-color: #1e1e1e;
+    border: 1px solid #3c3c3c;
+    gridline-color: #3c3c3c;
+    outline: none;
+}
+QTableWidget::item {
+    padding: 4px 6px;
+}
+QTableWidget::item:selected {
+    background-color: #094771;
+}
+QHeaderView::section {
+    background-color: #2d2d2d;
+    color: #cccccc;
+    padding: 4px 6px;
+    border: 1px solid #3c3c3c;
+}
+
+QSlider::groove:horizontal {
+    background: #3c3c3c;
+    height: 4px;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #007acc;
+    width: 14px;
+    margin: -6px 0;
+    border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+    background: #1177bb;
+}
 """

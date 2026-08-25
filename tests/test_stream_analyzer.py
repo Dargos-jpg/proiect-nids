@@ -2,9 +2,9 @@ from nids.capture.packet_meta import PacketMeta
 from nids.core.analysis import StreamAnalyzer
 
 
-def _packet(dst_port: int) -> PacketMeta:
+def _packet(dst_port: int, timestamp: float = 0.0) -> PacketMeta:
     return PacketMeta(
-        timestamp=0.0,
+        timestamp=timestamp,
         src_ip="10.0.0.1",
         dst_ip="10.0.0.2",
         protocol="tcp",
@@ -57,3 +57,40 @@ def test_stream_analyzer_ignores_traffic_below_threshold():
     update = analyzer.process_packet(_packet(20))
 
     assert update is None
+
+
+def test_window_ignores_ports_that_aged_out():
+    analyzer = StreamAnalyzer(port_scan_threshold=3, window_seconds=10.0)
+
+    updates = [
+        analyzer.process_packet(_packet(20, timestamp=0.0)),
+        analyzer.process_packet(_packet(21, timestamp=5.0)),
+        analyzer.process_packet(_packet(22, timestamp=25.0)),  # portul 20 a iesit din fereastra
+    ]
+
+    assert updates[2] is None  # doar 2 porturi active in fereastra (21, 22)
+
+
+def test_window_triggers_when_ports_clustered_in_time():
+    analyzer = StreamAnalyzer(port_scan_threshold=3, window_seconds=10.0)
+
+    updates = [
+        analyzer.process_packet(_packet(20, timestamp=0.0)),
+        analyzer.process_packet(_packet(21, timestamp=2.0)),
+        analyzer.process_packet(_packet(22, timestamp=4.0)),
+    ]
+
+    assert updates[2] is not None
+    assert updates[2].is_new is True
+
+
+def test_window_none_preserves_unbounded_behavior():
+    analyzer = StreamAnalyzer(port_scan_threshold=3, window_seconds=None)
+
+    updates = [
+        analyzer.process_packet(_packet(20, timestamp=0.0)),
+        analyzer.process_packet(_packet(21, timestamp=1000.0)),
+        analyzer.process_packet(_packet(22, timestamp=5000.0)),
+    ]
+
+    assert updates[2] is not None

@@ -20,6 +20,7 @@ data/models/*
 # loguri si audit trail generate local
 *.log
 logs/
+*.db
 
 # IDE
 .vscode/

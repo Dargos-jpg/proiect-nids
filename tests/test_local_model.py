@@ -50,3 +50,15 @@ def test_local_model_predict_empty_input():
     model = LocalModel.train(_normal_records())
 
     assert model.predict([]) == []
+
+
+def test_local_model_train_accepts_custom_contamination():
+    model = LocalModel.train(_normal_records(), contamination=0.2)
+
+    assert model._model.contamination == 0.2
+
+
+def test_local_model_train_defaults_to_auto_contamination():
+    model = LocalModel.train(_normal_records())
+
+    assert model._model.contamination == "auto"

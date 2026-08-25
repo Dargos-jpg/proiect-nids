@@ -4,11 +4,27 @@ from nids.capture.packet_meta import PacketMeta
 from nids.capture.pcap_reader import read_pcap
 from nids.core.event import Event, Severity
 from nids.signatures.port_scan import DEFAULT_PORT_THRESHOLD, PortScanEvent, detect_port_scans
+from nids.signatures.sensitive_ports import detect_sensitive_port_contacts, event_from_sensitive_port
 
 
-def analyze_pcap(path: str) -> list[Event]:
+def analyze_pcap(
+    path: str,
+    port_scan_threshold: int = DEFAULT_PORT_THRESHOLD,
+    port_scan_window: float | None = None,
+    sensitive_ports: set[int] | None = None,
+) -> list[Event]:
     packets = read_pcap(path)
-    return [event_from_port_scan(scan) for scan in detect_port_scans(packets)]
+    events = [
+        event_from_port_scan(scan)
+        for scan in detect_port_scans(
+            packets, threshold=port_scan_threshold, window_seconds=port_scan_window
+        )
+    ]
+    events.extend(
+        event_from_sensitive_port(evt)
+        for evt in detect_sensitive_port_contacts(packets, sensitive_ports or set())
+    )
+    return events
 
 
 def event_from_port_scan(scan: PortScanEvent, hits: int = 1) -> Event:
@@ -42,33 +58,44 @@ class StreamAnalyzer:
     randuri identice. un port deja vazut nu conteaza a doua oara - doar
     porturi noi indica scanare in desfasurare, nu doar trafic normal"""
 
-    def __init__(self, port_scan_threshold: int = DEFAULT_PORT_THRESHOLD) -> None:
+    def __init__(
+        self, port_scan_threshold: int = DEFAULT_PORT_THRESHOLD, window_seconds: float | None = None
+    ) -> None:
         self._threshold = port_scan_threshold
-        self._ports_by_pair: dict[tuple[str, str], set[int]] = {}
-        self._hits_by_pair: dict[tuple[str, str], int] = {}
+        self._window_seconds = window_seconds
+        # port + timestamp-ul primului contact, nu doar port - necesar ca
+        # sa putem elimina porturile iesite din fereastra cand exista una
+        self._hits_by_pair: dict[tuple[str, str], list[tuple[int, float]]] = {}
+        self._reported_hits_by_pair: dict[tuple[str, str], int] = {}
 
     def process_packet(self, pkt: PacketMeta) -> ScanUpdate | None:
         if pkt.dst_port is None:
             return None
 
         pair = (pkt.src_ip, pkt.dst_ip)
-        ports = self._ports_by_pair.setdefault(pair, set())
+        hits = self._hits_by_pair.setdefault(pair, [])
 
-        if pkt.dst_port in ports:
+        if self._window_seconds is not None:
+            cutoff = pkt.timestamp - self._window_seconds
+            hits[:] = [h for h in hits if h[1] >= cutoff]
+
+        ports_before = {port for port, _ in hits}
+        if pkt.dst_port in ports_before:
             return None
 
-        was_flagged = len(ports) >= self._threshold
-        ports.add(pkt.dst_port)
+        was_flagged = len(ports_before) >= self._threshold
+        hits.append((pkt.dst_port, pkt.timestamp))
+        ports = {port for port, _ in hits}
 
         if len(ports) < self._threshold:
             return None
 
-        self._hits_by_pair[pair] = self._hits_by_pair.get(pair, 0) + 1
+        self._reported_hits_by_pair[pair] = self._reported_hits_by_pair.get(pair, 0) + 1
         scan = PortScanEvent(
             src_ip=pair[0],
             dst_ip=pair[1],
             distinct_ports=len(ports),
             ports=sorted(ports),
         )
-        event = event_from_port_scan(scan, hits=self._hits_by_pair[pair])
+        event = event_from_port_scan(scan, hits=self._reported_hits_by_pair[pair])
         return ScanUpdate(pair=pair, event=event, is_new=not was_flagged)

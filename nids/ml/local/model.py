@@ -28,10 +28,15 @@ class LocalModel:
         self._feature_columns = feature_columns
 
     @classmethod
-    def train(cls, records: list[NslKddStyleFeatures]) -> LocalModel:
+    def train(
+        cls, records: list[NslKddStyleFeatures], contamination: float | str = "auto"
+    ) -> LocalModel:
+        """contamination = rata asteptata de anomalii in date - controleaza
+        direct cat de usor Isolation Forest marcheaza ceva drept anomalie
+        (mai mare = mai sensibil). 'auto' e euristica default din sklearn"""
         raw = to_feature_frame(records)
         encoded = encode_features(raw)
-        model = IsolationForest(random_state=42)
+        model = IsolationForest(random_state=42, contamination=contamination)
         model.fit(encoded)
         return cls(model, list(encoded.columns))
 

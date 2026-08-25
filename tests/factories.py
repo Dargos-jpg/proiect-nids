@@ -33,6 +33,8 @@ def make_record(**overrides) -> NslKddStyleFeatures:
         dst_host_srv_rerror_rate=0.0,
         src_ip="10.0.0.1",
         dst_ip="10.0.0.2",
+        src_port=5000,
+        dst_port=80,
     )
     base.update(overrides)
     return NslKddStyleFeatures(**base)

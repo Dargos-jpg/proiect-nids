@@ -13,7 +13,8 @@ PCAP_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / "http.cap"
 
 
 def test_covers_exactly_28_of_the_41_nsl_kdd_columns():
-    our_fields = {f.name for f in fields(NslKddStyleFeatures)} - {"src_ip", "dst_ip"}
+    identification_fields = {"src_ip", "dst_ip", "src_port", "dst_port"}
+    our_fields = {f.name for f in fields(NslKddStyleFeatures)} - identification_fields
 
     assert len(our_fields) == 28
     assert our_fields.issubset(set(ALL_FEATURE_COLUMNS))
@@ -36,6 +37,7 @@ def test_extract_on_real_pcap_produces_sane_values():
 
     assert http_record.protocol_type == "tcp"
     assert http_record.service == "http"
+    assert http_record.dst_port == 80
     assert http_record.src_bytes > 0
     assert http_record.dst_bytes > 0
     assert http_record.duration >= 0

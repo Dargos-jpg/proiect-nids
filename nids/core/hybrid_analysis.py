@@ -8,10 +8,17 @@ from nids.ml.expert.model import ExpertModel
 from nids.ml.expert.predict import predict_connections
 from nids.ml.features.nsl_kdd_style import extract_nsl_kdd_style_features
 from nids.ml.local.model import LocalModel
-from nids.signatures.port_scan import detect_port_scans
+from nids.signatures.port_scan import DEFAULT_PORT_THRESHOLD, detect_port_scans
+from nids.signatures.sensitive_ports import detect_sensitive_port_contacts, event_from_sensitive_port
 
 
-def analyze_pcap_hybrid(path: str, expert: ExpertModel) -> list[Event]:
+def analyze_pcap_hybrid(
+    path: str,
+    expert: ExpertModel,
+    port_scan_threshold: int = DEFAULT_PORT_THRESHOLD,
+    port_scan_window: float | None = None,
+    sensitive_ports: set[int] | None = None,
+) -> list[Event]:
     """analizeaza un PCAP cu toate cele trei mecanisme din context:
     semnaturi (port scan), model expert (pre-antrenat pe NSL-KDD) si
     model local. pentru un fisier static, modelul local se antreneaza
@@ -21,7 +28,16 @@ def analyze_pcap_hybrid(path: str, expert: ExpertModel) -> list[Event]:
     monitorizarea live, unde nu exista inca "restul fisierului" """
     packets = read_pcap(path)
 
-    events = [event_from_port_scan(scan) for scan in detect_port_scans(packets)]
+    events = [
+        event_from_port_scan(scan)
+        for scan in detect_port_scans(
+            packets, threshold=port_scan_threshold, window_seconds=port_scan_window
+        )
+    ]
+    events.extend(
+        event_from_sensitive_port(evt)
+        for evt in detect_sensitive_port_contacts(packets, sensitive_ports or set())
+    )
 
     records = extract_nsl_kdd_style_features(packets)
     if not records:
@@ -35,6 +51,10 @@ def analyze_pcap_hybrid(path: str, expert: ExpertModel) -> list[Event]:
         agreement = combine_predictions(expert_pred, local_pred)
         event = event_for_agreement(agreement, record.src_ip, record.dst_ip, expert_pred)
         if event is not None:
+            event.dest_ip = record.dst_ip
+            event.src_port = record.src_port
+            event.dest_port = record.dst_port
+            event.protocol = record.protocol_type
             events.append(event)
 
     return events
