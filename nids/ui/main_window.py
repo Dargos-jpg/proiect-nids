@@ -8,6 +8,7 @@ from nids.response.manager import BlockManager
 from nids.storage.event_store import EventStore
 from nids.ui.theme import DARK_STYLESHEET
 from nids.ui.widgets.dashboard_panel import DashboardPanel
+from nids.ui.widgets.honeypot_panel import HoneypotPanel
 from nids.ui.widgets.logs_panel import LogsPanel
 from nids.ui.widgets.ml_panel import MlPanel
 from nids.ui.widgets.response_panel import ResponsePanel
@@ -30,6 +31,7 @@ class MainWindow(QMainWindow):
         self._logs_panel = LogsPanel(self._event_store)
         self._ml_settings = MlSettings()
         self._response_settings = ResponseSettings()
+        self._honeypot_panel = HoneypotPanel(self._event_store)
 
         # zona centrala, ca "Scene" in Unity - vederea principala de lucru
         self._dashboard = DashboardPanel(
@@ -65,6 +67,13 @@ class MainWindow(QMainWindow):
         self._add_dock(
             "Raspuns",
             ResponsePanel(self._block_manager, self._response_settings),
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            tabify_with="Semnaturi",
+            min_width=right_dock_min_width,
+        )
+        self._add_dock(
+            "Honeypot",
+            self._honeypot_panel,
             Qt.DockWidgetArea.RightDockWidgetArea,
             tabify_with="Semnaturi",
             min_width=right_dock_min_width,
@@ -107,6 +116,16 @@ class MainWindow(QMainWindow):
         dock = QDockWidget(title, self)
         dock.setObjectName(f"dock_{title}")
         dock.setWidget(widget)
+        # fara buton de inchidere (X) - bug real gasit de user: daca
+        # scoti un panou din andocare (float) si il inchizi din X in loc
+        # sa-l tragi inapoi, dispare fara nicio urma vizibila de unde sa-l
+        # aduci inapoi decat prin meniul Vizualizare, usor de ratat. fara
+        # X, singura cale de a ascunde/arata un panou e prin acel meniu,
+        # care e deja un toggle - nu se mai poate "pierde" din greseala
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         if min_width is not None:
             dock.setMinimumWidth(min_width)
         if min_height is not None:
@@ -132,6 +151,7 @@ class MainWindow(QMainWindow):
         # close() si loveste o conexiune SQLite inchisa (bug real gasit
         # de user: sqlite3.ProgrammingError: Cannot operate on a closed database)
         self._logs_panel.stop()
+        self._honeypot_panel.stop()
         self._block_manager.shutdown()
         self._event_store.close()
         super().closeEvent(event)

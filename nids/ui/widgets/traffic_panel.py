@@ -17,7 +17,13 @@ from PySide6.QtWidgets import (
 from nids.capture.packet_meta import PacketMeta
 
 _COLUMNS = ["timp", "sursa", "port sursa", "destinatie", "port dest", "protocol", "dimensiune"]
-_MAX_ROWS = 500
+# 500 (limita initiala) insemna doar ~5 secunde de istoric la un volum
+# real de trafic (~100 pachete/secunda, semnalat de user) - imposibil sa
+# gasesti manual ceva acolo dupa ce trec cateva secunde. 5000 acopera
+# ~50s la acelasi volum - suficient sa prinzi rezultatul unui test rulat
+# manual, fara sa incarce vizibil UI-ul (filtrarea ramane O(randuri),
+# rapida chiar si la acest volum)
+_MAX_ROWS = 5000
 
 
 class TrafficPanel(QWidget):

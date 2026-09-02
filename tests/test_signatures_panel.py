@@ -1,5 +1,7 @@
 from PySide6.QtWidgets import QApplication
 
+from nids.signatures.brute_force import DEFAULT_ATTEMPT_THRESHOLD, DEFAULT_BRUTE_FORCE_PORTS
+from nids.signatures.dns_tunneling import DEFAULT_MIN_ENTROPY, DEFAULT_MIN_LABEL_LENGTH
 from nids.signatures.port_scan import DEFAULT_PORT_THRESHOLD
 from nids.signatures.sensitive_ports import DEFAULT_SENSITIVE_PORTS
 from nids.ui.widgets.signatures_panel import SignaturesPanel
@@ -110,3 +112,89 @@ def test_sensitive_ports_status_label_updates():
 
     assert "22" in panel._sensitive_ports_status.text()
     assert "1 port" in panel._sensitive_ports_status.text()
+
+
+# --- brute-force ---
+
+
+def test_brute_force_defaults_match_signature_defaults():
+    _app()
+    panel = SignaturesPanel()
+
+    assert panel.brute_force_threshold() == DEFAULT_ATTEMPT_THRESHOLD
+    assert panel.brute_force_ports() == DEFAULT_BRUTE_FORCE_PORTS
+
+
+def test_brute_force_threshold_is_adjustable():
+    _app()
+    panel = SignaturesPanel()
+
+    panel._brute_force_threshold_spin.setValue(10)
+
+    assert panel.brute_force_threshold() == 10
+
+
+def test_brute_force_window_is_adjustable():
+    _app()
+    panel = SignaturesPanel()
+
+    panel._brute_force_window_spin.setValue(60)
+
+    assert panel.brute_force_window_seconds() == 60.0
+
+
+def test_brute_force_ports_parses_comma_separated_list():
+    _app()
+    panel = SignaturesPanel()
+
+    panel._brute_force_ports_edit.setText("22, 3389")
+
+    assert panel.brute_force_ports() == {22, 3389}
+
+
+# --- DNS tunneling ---
+
+
+def test_dns_tunneling_defaults_match_signature_defaults():
+    _app()
+    panel = SignaturesPanel()
+
+    assert panel.dns_min_label_length() == DEFAULT_MIN_LABEL_LENGTH
+    assert panel.dns_min_entropy() == DEFAULT_MIN_ENTROPY
+
+
+def test_dns_min_label_length_is_adjustable():
+    _app()
+    panel = SignaturesPanel()
+
+    panel._dns_min_length_spin.setValue(20)
+
+    assert panel.dns_min_label_length() == 20
+
+
+def test_dns_min_entropy_is_adjustable():
+    _app()
+    panel = SignaturesPanel()
+
+    panel._dns_min_entropy_spin.setValue(4.0)
+
+    assert panel.dns_min_entropy() == 4.0
+
+
+# --- semnaturi malware in payload ---
+
+
+def test_payload_signatures_enabled_by_default():
+    _app()
+    panel = SignaturesPanel()
+
+    assert panel.payload_signatures_enabled() is True
+
+
+def test_payload_signatures_can_be_disabled():
+    _app()
+    panel = SignaturesPanel()
+
+    panel._payload_signatures_checkbox.setChecked(False)
+
+    assert panel.payload_signatures_enabled() is False

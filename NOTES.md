@@ -1,5 +1,9 @@
 # notite dezvoltare
 
+bug-uri reale gasite de user in timpul testarii + fix-uri aplicate: vezi
+BUGS.md (fisier separat, ca sa nu se piarda printre notele de
+arhitectura/features de mai jos).
+
 ## decizii luate
 
 - Python + scikit-learn + Scapy + PySide6 (nu C#/.NET, decizie deliberata)
@@ -398,6 +402,111 @@ Trafic doar ca sa deschida analiza ML.
     flagata din nou, mai tarziu) e de fapt exact semnalul temporal util
     userului ("era flagged si data trecuta?"), nu risipa
 
+## patru semnaturi noi: brute-force, ARP spoofing, DNS tunneling, payload malware
+
+user a cerut "tot ce merita" din lista de semnaturi ramase din
+CONTEXT-nids.md, plus explicit DNS tunneling + semnaturi malware in
+payload (desi acestea doua au o limitare reala documentata clar, nu
+ascunsa: functioneaza doar pe trafic NECRIPTAT).
+
+**brute-force** (`nids/signatures/brute_force.py`) - acelasi tipar ca
+port_scan.py (fereastra glisanta), dar numara porturi SURSA distincte
+(incercari de conectare) catre ACELASI serviciu, nu porturi destinatie
+distincte. `detect_brute_force()` (batch) + `BruteForceTracker` (live).
+UI: prag, fereastra, porturi tinta editabile (implicit FTP/SSH/Telnet/RDP).
+
+**ARP spoofing** (`nids/capture/arp_meta.py` + `nids/signatures/arp_spoofing.py`)
+- prima semnatura care a cerut o cale de captura noua: ARP nu are strat
+IP, era filtrat complet inainte (`if IP in pkt` in live_capture.py/
+pcap_reader.py). adaugat `capture_live(on_arp=...)` + `read_pcap_arp()`,
+paralel cu fluxul IP existent, neatins. detectia: urmareste legaturile
+IP<->MAC afirmate de trafic ARP in ordine cronologica, flagheaza cand
+aceeasi adresa e revendicata de un MAC diferit. limitare asumata:
+schimbari legitime de MAC (placa noua, VM migrat, DHCP) sunt fals-pozitive
+posibile, la fel ca orice semnatura comportamentala.
+
+**DNS tunneling** (`nids/capture/dns_meta.py` + `nids/signatures/dns_tunneling.py`)
+- DNS (spre deosebire de HTTPS) circula necriptat, deci poate fi inspectat
+real. euristica clasica: entropie Shannon mare + lungime mare pe eticheta
+de subdomeniu (text ales de oameni are entropie joasa, date encodate
+base32/64/hex se apropie de 4+ biti/caracter). praguri implicite (30
+caractere, 3.5 biti/caracter) validate empiric cu stringuri reale (hash
+hex ~3.8, base64 ~4.6, text normal ~0). a doua cale de captura noua
+(`on_dns`, subset al pachetelor IP - DNS ruleaza peste UDP).
+
+**semnaturi malware in payload** (`nids/capture/payload_meta.py` +
+`nids/signatures/payload_signatures.py`) - a treia cale de captura noua
+(`on_payload`). set mic, curatat manual, de pattern-uri cunoscute (EICAR
+- semnatura STANDARD de test antivirus, traversare de director, SQL
+injection, XSS, marker de webshell) - potrivire simpla de subsir de
+octeti, nu regex/motor de reguli complet. **payload-ul NU e stocat
+nicaieri pe termen lung** (spre deosebire de PacketMeta) - trecut o
+singura data prin callback pentru scanare, apoi aruncat, exact ca sa evite
+cresterea de memorie deja documentata ca risc la volum mare de trafic.
+LIMITARE REALA, documentata explicit si in UI (nu doar in cod): functioneaza
+DOAR pe trafic necriptat - HTTPS/TLS (majoritatea traficului modern)
+ramane opac, la fel ca oricarui NIDS bazat pe retea, nu doar acestuia.
+checkbox de activare/dezactivare in SignaturesPanel (implicit activat).
+
+toate patru: `detect_X()` (batch, PCAP) + `XTracker` (live streaming),
+acelasi tipar consistent folosit deja pentru port_scan/sensitive_ports.
+wired complet in analyze_pcap/analyze_pcap_hybrid + DashboardPanel
+(live) + SignaturesPanel (UI). 407 teste in total dupa acest lot.
+
+## honeypot (prima din cele trei "extinderi viitoare" - user a ales sa incepem cu asta)
+
+CONTEXT-nids.md mentiona honeypot/packet forensics/scanner de vulnerabilitati
+ca extensii viitoare ale acestui proiect, nu proiecte separate. userul a
+ales sa inceapa cu honeypot-ul - cel mai aliniat cu ce exista deja (Loguri,
+Raspuns), si singurul semnal din toata aplicatia FARA risc de fals-pozitiv:
+niciun serviciu legitim nu asculta pe un port de honeypot, deci orice
+conexiune acolo e prin definitie suspecta.
+
+- **modul nou `nids/honeypot/`** (nu `signatures/` - nu e detectie pasiva
+  peste pachete capturate, e un serviciu ACTIV care asculta):
+  - `listener.py::run_honeypot()` - un singur thread, `selectors`
+    (neblocant) peste toate porturile configurate simultan, plus un
+    thread SCURT separat per conexiune acceptata (trimite un banner
+    minim daca exista unul pentru acel port, citeste cel mult 256 octeti
+    cu timeout 2s, inchide) - o conexiune lenta nu blocheaza acceptarea
+    altora. eroare de bind pe un port (deja ocupat, sau interzis de OS -
+    vezi mai jos) nu opreste restul porturilor, doar raporteaza si
+    continua cu ce a reusit
+  - **niciun protocol real emulat** - doar un banner static (SSH/Telnet)
+    si logare a ce trimite clientul, NICIODATA interpretat/executat. fara
+    asta ar deveni el insusi o suprafata de atac, exact ce nu trebuie
+    sa fie un honeypot safe
+  - porturi implicite mari (2222, 8080, 3306 - nu 22/23/445/3389 direct,
+    ca sa nu intre in conflict cu servicii reale care ar putea rula deja
+    pe alea, si ca sa nu ceara drepturi de administrator (>1024))
+- `HoneypotThread` (QThread) - acelasi tipar ca LiveCaptureThread/
+  SimulationThread (subclasare directa, run() = un singur apel blocant)
+- `HoneypotPanel` - self-continut (spre deosebire de SignaturesPanel/
+  MlSettings/ResponseSettings, nu are nevoie sa fie citit de alt panou -
+  doar scrie in EventStore, la fel ca orice alta sursa). camp de porturi
+  editabil + buton pornit/oprit, ca la simulare. **bug prins in timpul
+  scrierii testelor**: daca toate porturile esueaza la bind, thread-ul
+  se termina aproape imediat, iar handler-ul generic de "thread terminat"
+  suprascria mesajul de eroare cu "honeypot oprit" inainte sa apuce
+  userul sa-l vada - fixat cu un flag `_had_bind_error` care pastreaza
+  mesajul relevant
+- **bug de mediu prins la testare, nu de cod**: un test cu porturi fixe
+  (58233/58234) esua constant cu timeout la conectare - investigat pana
+  la cauza reala: acel port specific era interzis la bind pe Windows
+  (`PermissionError: WinError 10013`), probabil o rezervare Hyper-V/WSL
+  care nu apare in `netsh interface ipv4 show excludedportrange`. fix:
+  toate testele descopera un port liber dinamic (bind pe portul 0, apoi
+  `getsockname()`) in loc sa presupuna numere fixe - robust indiferent
+  de ce rezervari de porturi are masina curenta
+- honeypot-ul salveaza direct in EventStore (ca orice sursa) - apare
+  automat in Loguri, nu in lista live din Dashboard (care e legata strict
+  de o sesiune de monitorizare/PCAP) - scop deliberat mai restrans, sa nu
+  cupleze HoneypotPanel de DashboardPanel fara motiv
+- **neimplementat inca, notat ca pas urmator posibil**: ideea din
+  CONTEXT-nids.md ca honeypot-ul sa devina sursa de date reale pentru
+  reantrenarea modelului expert (in loc de doar NSL-KDD static) - scop
+  separat, mult mai mare, nu a fost cerut inca
+
 ## raspuns automat (nivelul din CONTEXT-nids.md ramas neimplementat)
 
 CONTEXT-nids.md prevedea de la inceput doua niveluri de raspuns: "automat,
@@ -597,128 +706,6 @@ implementate impreuna cu un istoric de blocari in Raspuns.
   (evenimentul "blocare manuala" salvat separat la block-time)
   - ResponsePanel are acum un al doilea tabel sub cel de blocari active,
     cele mai recente intai
-
-## BUG REAL gasit de user si reparat: nu se putea analiza o conexiune blocata manual, din Loguri
-
-user a blocat manual o conexiune ML (click dreapta pe un eveniment din
-Dashboard -> "Blocheaza"), apoi a incercat sa deschida analiza completa
-din randul "blocare manuala" aparut in Loguri - nu se intampla nimic.
-
-cauza: `_block_event_source()` crea un `Event` nou ("blocare manuala")
-fara sa mosteneasca NIMIC din evenimentul original care a declansat
-blocarea - nici dest_ip/porturi/protocol, nici assessment_json (poza
-completa a analizei ML, deja calculata la momentul respectiv). desi
-originea blocarii ESTE o conexiune analizata, noul eveniment nu avea nicio
-legatura cu ea - cadea exact in cazul "acest eveniment nu are o conexiune
-ML asociata", desi ar fi trebuit sa aiba.
-
-fix: `_block_event_source()` copiaza acum dest_ip/src_port/dest_port/
-protocol/assessment_json de pe evenimentul original pe noul eveniment de
-"blocare manuala" - Dashboard are deja obiectul `Event` complet la
-indemana (e cel stocat pe itemul din `_event_list`, cu tot cu
-assessment_json daca a fost generat de ML), doar nu era propagat mai
-departe. acum click-dreapta -> "Analizeaza aceasta conexiune cu ML" pe
-randul de "blocare manuala" deschide acelasi dialog complet ca pe
-evenimentul original.
-
-## BUG REAL gasit de user si reparat: selectia din Loguri "aluneca" la refresh
-
-user a semnalat: selecteaza un rand in tabelul din Loguri, apare un
-eveniment nou, iar randul ramane vizual selectat dar acum arata alt
-eveniment.
-
-cauza: `LogsPanel._refresh_table()` reconstruieste tabelul integral la
-fiecare 2 secunde (interogare noua din SQLite, `setRowCount` +
-`setItem` pentru fiecare celula) - Qt pastreaza selectia pe INDEXUL de
-rand, nu pe identitatea itemului. cum `recent()` intoarce cele mai noi
-evenimente PRIMELE (`ORDER BY id DESC`), un eveniment nou aparut e
-inserat pe randul 0 si impinge tot ce era mai vechi cu un rand mai jos -
-randul ramas "selectat" (acelasi index) arata acum alt eveniment.
-
-fix: `StoredEvent` are acum campul `id` (PRIMARY KEY-ul din SQLite,
-adaugat la finalul `_SELECT_COLUMNS`/dataclass - `id: int = -1` implicit
-pentru constructiile sintetice din teste, care nu vin din DB).
-`LogsPanel._refresh_table()` retine id-urile randurilor selectate
-INAINTE de reconstructie (`_selected_entry_ids()`) si re-aplica selectia
-DUPA (`_restore_selection()`), gasind randul unde a ajuns acum acelasi
-id - selectia "urmareste" evenimentul, nu pozitia lui in tabel.
-
-## BUG REAL gasit de user si reparat: crash la inchidere - refresh dupa EventStore.close()
-
-user a vazut in consola, dupa ce a inchis aplicatia:
-`sqlite3.ProgrammingError: Cannot operate on a closed database`, venind
-din `LogsPanel._refresh()` -> `distinct_sources()`.
-
-cauza: `LogsPanel` are propriul `QTimer` (refresh la 2s), pornit in
-`__init__` si NICIODATA oprit explicit. `MainWindow.closeEvent()` apela
-`self._event_store.close()`, dar timer-ul QTimer al LogsPanel ramanea
-activ - un tick programat mai putea rula DUPA close(), lovind o conexiune
-SQLite deja inchisa. (ResponsePanel/MlPanel au acelasi tipar de timer,
-dar interogheaza BlockManager/DashboardPanel, care nu au un "close" care
-sa le invalideze - de-asta doar Loguri crapa)
-
-fix: `LogsPanel.stop()` (metoda noua) opreste timer-ul explicit.
-`MainWindow.closeEvent()` o apeleaza INAINTE de `event_store.close()` -
-ordine care elimina complet cursa, pentru ca totul ruleaza pe acelasi
-thread UI (fara concurenta reala, doar ordine gresita de apeluri).
-
-## BUG REAL gasit de user si reparat: crash la blocare fara drepturi de Administrator
-
-user a incercat sa blocheze manual o adresa IP (click dreapta pe un
-eveniment din Dashboard -> "Blocheaza") si aplicatia a crapat cu un
-traceback in terminal, in loc sa arate o eroare in UI.
-
-cauza: `add_block_rule()` (nids/response/block.py) ruleaza `netsh
-advfirewall firewall add rule ...` cu `check=True` - pe Windows, aceasta
-comanda cere drepturi de Administrator; aplicatia userului rula dintr-un
-terminal normal, deci `netsh` a refuzat si `subprocess.run` a aruncat
-`CalledProcessError`. acea exceptie nu era prinsa NICAIERI pe drum:
-`BlockManager.block()` -> `DashboardPanel._block_event_source()` -> lambda
-conectata la `action.triggered` - a scapat pana in bucla de evenimente
-Qt si a crapat aplicatia.
-
-fix, in doua straturi:
-- `BlockManager` (nids/response/manager.py) nu mai lasa NICIO exceptie de
-  la backend-ul injectat (add_rule/remove_rule) sa scape necontrolat:
-  - `block()`: orice exceptie de la `add_rule` e prinsa si re-aruncata ca
-    `BlockRuleError` (exceptie proprie, catchabila explicit de UI, nu mai
-    leaga BlockManager de detalii specifice netsh). starea interna ramane
-    curata la esec - IP-ul NU ajunge in `_blocked`/`history()`
-  - `_unblock_locked()`: orice exceptie de la `remove_rule` e prinsa si
-    IGNORATA (best-effort) - altfel un esec la deblocare ar lasa IP-ul
-    "blocat pentru totdeauna" fara nicio cale de a-l scoate din UI, sau
-    ar opri la jumatate bucla din `shutdown()` (ar lasa unele reguli
-    active si ar impiedica inchiderea curata a event_store-ului). o
-    regula de firewall ramasa e mai reparabila decat o stare interna blocata
-- `DashboardPanel._block_event_source()` prinde `BlockRuleError` explicit,
-  arata un mesaj clar in bara de status ("...ruleaza aplicatia ca
-  Administrator pentru blocare de firewall") si salveaza o intrare
-  "blocare esuata" in Loguri (audit trail, la fel ca orice alta actiune)
-  in loc de "blocare manuala"
-
-## BUG REAL gasit de user si reparat: pierderea modelului local la inchidere
-
-user a observat ca modelul local, care avea 85+ conexiuni antrenate
-inainte sa inchida aplicatia, repornea de la 0/50 la deschiderea urmatoare
-- desi persistenta (save/load) era deja implementata (pasul 13).
-
-cauza: MainWindow.closeEvent() apela doar stop_monitoring() (asincron -
-doar semnaleaza thread-ul sa se opreasca, nu asteapta). salvarea
-modelului local se intampla in _on_thread_finished(), declansat de
-semnalul QThread.finished - dar acel semnal e livrat prin coada de
-evenimente a thread-ului principal, care se putea sa nu mai apuce sa
-proceseze nimic inainte ca aplicatia sa se inchida complet. rezultat:
-_on_thread_finished() (deci si salvarea) nu rula NICIODATA la inchidere,
-doar la apasarea manuala a butonului "Opreste monitorizare" (unde
-aplicatia ramane deschisa si event loop-ul continua sa ruleze normal).
-
-fix: DashboardPanel.shutdown() (metoda noua, distincta de
-stop_monitoring()) - opreste SINCRON: semnaleaza thread-ul, asteapta
-efectiv cu QThread.wait(3000), apoi salveaza modelul local DIRECT, fara
-sa se bazeze pe semnalul finished. MainWindow.closeEvent() foloseste
-acum shutdown() in loc de stop_monitoring(). stop_monitoring() (asincron)
-ramane neschimbat pentru click normal pe buton - acolo async e corect,
-nu vrem sa inghetam UI-ul 3 secunde la un simplu stop manual.
 
 ## note tehnice minore
 

@@ -2,7 +2,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication
 
 from nids.capture.packet_meta import PacketMeta
-from nids.ui.widgets.traffic_panel import TrafficPanel
+from nids.ui.widgets.traffic_panel import _MAX_ROWS, TrafficPanel
 
 
 def _app() -> QApplication:
@@ -40,10 +40,10 @@ def test_add_packet_caps_row_count():
     _app()
     panel = TrafficPanel()
 
-    for _ in range(510):
+    for _ in range(_MAX_ROWS + 10):
         panel.add_packet(_packet())
 
-    assert panel._table.rowCount() == 500
+    assert panel._table.rowCount() == _MAX_ROWS
 
 
 def test_load_packets_replaces_table():

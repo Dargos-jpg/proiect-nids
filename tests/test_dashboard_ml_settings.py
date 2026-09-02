@@ -22,7 +22,9 @@ def _fake_block_manager() -> BlockManager:
     return BlockManager(add_rule=lambda ip: None, remove_rule=lambda ip: None)
 
 
-def _fake_capture_live(on_packet, interface=None, stop_event=None):
+def _fake_capture_live(
+    on_packet, on_arp=None, on_dns=None, on_payload=None, interface=None, stop_event=None
+):
     while stop_event is not None and not stop_event.is_set():
         time.sleep(0.02)
 

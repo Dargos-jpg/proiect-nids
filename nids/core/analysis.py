@@ -1,8 +1,25 @@
 from dataclasses import dataclass
 
+from nids.capture.arp_meta import read_pcap_arp
+from nids.capture.dns_meta import read_pcap_dns_queries
 from nids.capture.packet_meta import PacketMeta
 from nids.capture.pcap_reader import read_pcap
+from nids.capture.payload_meta import read_pcap_payload_samples
 from nids.core.event import Event, Severity
+from nids.signatures.arp_spoofing import detect_arp_spoofing, event_from_arp_spoof
+from nids.signatures.brute_force import (
+    DEFAULT_ATTEMPT_THRESHOLD,
+    DEFAULT_WINDOW_SECONDS as DEFAULT_BRUTE_FORCE_WINDOW_SECONDS,
+    detect_brute_force,
+    event_from_brute_force,
+)
+from nids.signatures.dns_tunneling import (
+    DEFAULT_MIN_ENTROPY,
+    DEFAULT_MIN_LABEL_LENGTH,
+    detect_dns_tunneling,
+    event_from_dns_tunnel,
+)
+from nids.signatures.payload_signatures import detect_payload_signatures, event_from_payload_match
 from nids.signatures.port_scan import DEFAULT_PORT_THRESHOLD, PortScanEvent, detect_port_scans
 from nids.signatures.sensitive_ports import detect_sensitive_port_contacts, event_from_sensitive_port
 
@@ -12,6 +29,12 @@ def analyze_pcap(
     port_scan_threshold: int = DEFAULT_PORT_THRESHOLD,
     port_scan_window: float | None = None,
     sensitive_ports: set[int] | None = None,
+    brute_force_threshold: int = DEFAULT_ATTEMPT_THRESHOLD,
+    brute_force_window: float = DEFAULT_BRUTE_FORCE_WINDOW_SECONDS,
+    brute_force_ports: set[int] | None = None,
+    dns_min_label_length: int = DEFAULT_MIN_LABEL_LENGTH,
+    dns_min_entropy: float = DEFAULT_MIN_ENTROPY,
+    payload_signatures_enabled: bool = True,
 ) -> list[Event]:
     packets = read_pcap(path)
     events = [
@@ -24,6 +47,31 @@ def analyze_pcap(
         event_from_sensitive_port(evt)
         for evt in detect_sensitive_port_contacts(packets, sensitive_ports or set())
     )
+    events.extend(
+        event_from_brute_force(evt)
+        for evt in detect_brute_force(
+            packets,
+            threshold=brute_force_threshold,
+            window_seconds=brute_force_window,
+            target_ports=brute_force_ports,
+        )
+    )
+    events.extend(
+        event_from_arp_spoof(evt) for evt in detect_arp_spoofing(read_pcap_arp(path))
+    )
+    events.extend(
+        event_from_dns_tunnel(evt)
+        for evt in detect_dns_tunneling(
+            read_pcap_dns_queries(path),
+            min_label_length=dns_min_label_length,
+            min_entropy=dns_min_entropy,
+        )
+    )
+    if payload_signatures_enabled:
+        events.extend(
+            event_from_payload_match(m)
+            for m in detect_payload_signatures(read_pcap_payload_samples(path))
+        )
     return events
 
 

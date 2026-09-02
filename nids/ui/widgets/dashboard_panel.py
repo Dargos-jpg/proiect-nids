@@ -11,13 +11,17 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from nids.capture.arp_meta import ArpFrame
+from nids.capture.dns_meta import DnsQuery
 from nids.capture.packet_meta import PacketMeta
 from nids.capture.pcap_reader import read_pcap
+from nids.capture.payload_meta import PayloadSample
 from nids.core.analysis import ScanUpdate, StreamAnalyzer, analyze_pcap
 from nids.core.event import Event, Severity
 from nids.core.hybrid_analysis import analyze_pcap_hybrid
@@ -30,6 +34,10 @@ from nids.ml.expert.model import ExpertModel
 from nids.ml.features.nsl_kdd_style import NslKddStyleFeatures, extract_nsl_kdd_style_features
 from nids.ml.local.learning import LocalModelManager
 from nids.response.manager import BlockManager, BlockRuleError
+from nids.signatures.arp_spoofing import ArpSpoofTracker
+from nids.signatures.brute_force import BruteForceTracker
+from nids.signatures.dns_tunneling import DnsTunnelTracker
+from nids.signatures.payload_signatures import PayloadSignatureTracker
 from nids.signatures.sensitive_ports import SensitivePortTracker
 from nids.storage.event_store import EventStore, StoredEvent
 from nids.ui.live_capture_thread import LiveCaptureThread
@@ -117,6 +125,10 @@ class DashboardPanel(QWidget):
         self._simulation_thread: SimulationThread | None = None
         self._stream_analyzer: StreamAnalyzer | None = None
         self._sensitive_tracker: SensitivePortTracker | None = None
+        self._brute_force_tracker: BruteForceTracker | None = None
+        self._arp_spoof_tracker: ArpSpoofTracker | None = None
+        self._dns_tunnel_tracker: DnsTunnelTracker | None = None
+        self._payload_tracker: PayloadSignatureTracker | None = None
         self._live_hybrid: LiveHybridAnalyzer | None = None
         self._packet_count = 0
         self._event_items: dict[tuple[str, str], QListWidgetItem] = {}
@@ -164,6 +176,12 @@ class DashboardPanel(QWidget):
         threshold = self._signatures_panel.threshold()
         window = self._signatures_panel.window_seconds()
         sensitive_ports = self._signatures_panel.sensitive_ports()
+        brute_force_threshold = self._signatures_panel.brute_force_threshold()
+        brute_force_window = self._signatures_panel.brute_force_window_seconds()
+        brute_force_ports = self._signatures_panel.brute_force_ports()
+        dns_min_label_length = self._signatures_panel.dns_min_label_length()
+        dns_min_entropy = self._signatures_panel.dns_min_entropy()
+        payload_signatures_enabled = self._signatures_panel.payload_signatures_enabled()
         if self._expert_model is not None:
             events = analyze_pcap_hybrid(
                 path,
@@ -171,6 +189,12 @@ class DashboardPanel(QWidget):
                 port_scan_threshold=threshold,
                 port_scan_window=window,
                 sensitive_ports=sensitive_ports,
+                brute_force_threshold=brute_force_threshold,
+                brute_force_window=brute_force_window,
+                brute_force_ports=brute_force_ports,
+                dns_min_label_length=dns_min_label_length,
+                dns_min_entropy=dns_min_entropy,
+                payload_signatures_enabled=payload_signatures_enabled,
             )
         else:
             events = analyze_pcap(
@@ -178,6 +202,12 @@ class DashboardPanel(QWidget):
                 port_scan_threshold=threshold,
                 port_scan_window=window,
                 sensitive_ports=sensitive_ports,
+                brute_force_threshold=brute_force_threshold,
+                brute_force_window=brute_force_window,
+                brute_force_ports=brute_force_ports,
+                dns_min_label_length=dns_min_label_length,
+                dns_min_entropy=dns_min_entropy,
+                payload_signatures_enabled=payload_signatures_enabled,
             )
         self._show_events(path, events)
 
@@ -209,6 +239,19 @@ class DashboardPanel(QWidget):
             window_seconds=self._signatures_panel.window_seconds(),
         )
         self._sensitive_tracker = SensitivePortTracker(self._signatures_panel.sensitive_ports())
+        self._brute_force_tracker = BruteForceTracker(
+            threshold=self._signatures_panel.brute_force_threshold(),
+            window_seconds=self._signatures_panel.brute_force_window_seconds(),
+            target_ports=self._signatures_panel.brute_force_ports(),
+        )
+        self._arp_spoof_tracker = ArpSpoofTracker()
+        self._dns_tunnel_tracker = DnsTunnelTracker(
+            min_label_length=self._signatures_panel.dns_min_label_length(),
+            min_entropy=self._signatures_panel.dns_min_entropy(),
+        )
+        self._payload_tracker = (
+            PayloadSignatureTracker() if self._signatures_panel.payload_signatures_enabled() else None
+        )
         local_manager = LocalModelManager.load_or_new(
             min_training_samples=self._ml_settings.min_training_samples,
             retrain_every=self._ml_settings.retrain_every,
@@ -223,6 +266,9 @@ class DashboardPanel(QWidget):
 
         self._thread = LiveCaptureThread()
         self._thread.packet_captured.connect(self._on_live_packet)
+        self._thread.arp_frame_captured.connect(self._on_live_arp_frame)
+        self._thread.dns_query_captured.connect(self._on_live_dns_query)
+        self._thread.payload_sample_captured.connect(self._on_live_payload_sample)
         self._thread.error.connect(self._on_live_error)
         self._thread.finished.connect(self._on_thread_finished)
         self._thread.finished.connect(self._thread.deleteLater)
@@ -285,6 +331,36 @@ class DashboardPanel(QWidget):
             if sensitive_event is not None:
                 self._append_events([sensitive_event])
                 self._traffic_chart.record_event(sensitive_event.severity)
+
+        if self._brute_force_tracker is not None:
+            brute_force_event = self._brute_force_tracker.process_packet(pkt)
+            if brute_force_event is not None:
+                self._append_events([brute_force_event])
+                self._traffic_chart.record_event(brute_force_event.severity)
+
+    def _on_live_arp_frame(self, frame: ArpFrame) -> None:
+        if self._arp_spoof_tracker is None:
+            return
+        event = self._arp_spoof_tracker.process_frame(frame)
+        if event is not None:
+            self._append_events([event])
+            self._traffic_chart.record_event(event.severity)
+
+    def _on_live_dns_query(self, query: DnsQuery) -> None:
+        if self._dns_tunnel_tracker is None:
+            return
+        event = self._dns_tunnel_tracker.process_query(query)
+        if event is not None:
+            self._append_events([event])
+            self._traffic_chart.record_event(event.severity)
+
+    def _on_live_payload_sample(self, sample: PayloadSample) -> None:
+        if self._payload_tracker is None:
+            return
+        event = self._payload_tracker.process_sample(sample)
+        if event is not None:
+            self._append_events([event])
+            self._traffic_chart.record_event(event.severity)
 
     def _on_live_error(self, message: str) -> None:
         self._status_label.setText(f"eroare captura live: {message}")
@@ -443,9 +519,21 @@ class DashboardPanel(QWidget):
             self._show_inspector(assessment_from_json(entry.assessment_json))
             return
 
-        if entry.dest_ip is None:
-            self._status_label.setText(
-                "acest eveniment nu are o conexiune ML asociata (semnatura sau actiune manuala)"
+        # BUG REAL gasit de user: brute-force/porturi sensibile salveaza
+        # dest_ip/dest_port (pentru context), dar NU src_port - nu exista
+        # un singur port sursa asociat (brute-force = mai multe incercari,
+        # deci mai multe porturi sursa). fara src_port, _find_matching_connection()
+        # nu poate gasi NICIODATA o potrivire exacta - trebuia verificat
+        # explicit aici, altfel cade in mesajul generic "nu s-a putut
+        # identifica conexiunea", care pare identic cu "nu se intampla nimic"
+        if entry.dest_ip is None or entry.src_port is None:
+            QMessageBox.information(
+                self,
+                "Analiza indisponibila",
+                "Acest eveniment nu are o conexiune ML asociata - e generat de o "
+                "semnatura (port scan, brute-force, porturi sensibile, ARP spoofing, "
+                "DNS tunneling, honeypot) sau de o actiune manuala, nu de o evaluare "
+                "a modelelor ML.",
             )
             return
         self._analyze_connection(

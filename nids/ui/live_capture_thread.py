@@ -15,6 +15,9 @@ class LiveCaptureThread(QThread):
     se termina, fara cod suplimentar"""
 
     packet_captured = Signal(object)
+    arp_frame_captured = Signal(object)
+    dns_query_captured = Signal(object)
+    payload_sample_captured = Signal(object)
     error = Signal(str)
 
     def __init__(self, interface: str | None = None, parent=None) -> None:
@@ -29,6 +32,9 @@ class LiveCaptureThread(QThread):
         try:
             capture_live(
                 self.packet_captured.emit,
+                on_arp=self.arp_frame_captured.emit,
+                on_dns=self.dns_query_captured.emit,
+                on_payload=self.payload_sample_captured.emit,
                 interface=self._interface,
                 stop_event=self._stop_event,
             )

@@ -3,22 +3,46 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from nids.signatures.brute_force import (
+    DEFAULT_ATTEMPT_THRESHOLD,
+    DEFAULT_BRUTE_FORCE_PORTS,
+    DEFAULT_WINDOW_SECONDS as DEFAULT_BRUTE_FORCE_WINDOW_SECONDS,
+)
+from nids.signatures.dns_tunneling import DEFAULT_MIN_ENTROPY, DEFAULT_MIN_LABEL_LENGTH
+from nids.signatures.payload_signatures import DEFAULT_PAYLOAD_SIGNATURES
 from nids.signatures.port_scan import DEFAULT_PORT_THRESHOLD
 from nids.signatures.sensitive_ports import DEFAULT_SENSITIVE_PORTS
 
 _MIN_THRESHOLD = 2
 _MAX_THRESHOLD = 20
 _DEFAULT_WINDOW_SECONDS = 30
+
+
+def _parse_ports(text: str) -> set[int]:
+    ports: set[int] = set()
+    for token in text.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            port = int(token)
+        except ValueError:
+            continue
+        if 0 < port <= 65535:
+            ports.add(port)
+    return ports
 
 
 class SignaturesPanel(QWidget):
@@ -56,13 +80,34 @@ class SignaturesPanel(QWidget):
         )
         hint_label.setStyleSheet("color: #8a8a8a;")
 
+        # continutul (5 grupuri de setari) a crescut prea mult ca sa
+        # stea direct in panou - fara scroll, inaltimea lui minima
+        # dicta inaltimea minima a INTREGII zone de andocare din
+        # dreapta (Semnaturi/ML/Raspuns/Honeypot sunt tab-uite impreuna),
+        # blocand redimensionarea Logurilor de jos. bug real gasit de
+        # user. cu scroll, panoul poate fi oricat de mic, continutul
+        # ramane accesibil prin derulare
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.addWidget(self._title_label)
+        content_layout.addWidget(self._slider)
+        content_layout.addWidget(hint_label)
+        content_layout.addWidget(self._build_window_group())
+        content_layout.addWidget(self._build_sensitive_ports_group())
+        content_layout.addWidget(self._build_brute_force_group())
+        content_layout.addWidget(self._build_dns_tunneling_group())
+        content_layout.addWidget(self._build_payload_signatures_group())
+        content_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setMinimumHeight(120)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(self._title_label)
-        layout.addWidget(self._slider)
-        layout.addWidget(hint_label)
-        layout.addWidget(self._build_window_group())
-        layout.addWidget(self._build_sensitive_ports_group())
-        layout.addStretch()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll)
 
     def threshold(self) -> int:
         return self._slider.value()
@@ -142,15 +187,106 @@ class SignaturesPanel(QWidget):
             self._sensitive_ports_status.setText("nicio semnatura activa (lista goala)")
 
     def sensitive_ports(self) -> set[int]:
-        ports: set[int] = set()
-        for token in self._sensitive_ports_edit.text().split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                port = int(token)
-            except ValueError:
-                continue
-            if 0 < port <= 65535:
-                ports.add(port)
-        return ports
+        return _parse_ports(self._sensitive_ports_edit.text())
+
+    # --- brute-force ---
+
+    def _build_brute_force_group(self) -> QGroupBox:
+        group = QGroupBox("Brute-force (incercari repetate catre acelasi serviciu)")
+        form = QFormLayout(group)
+
+        self._brute_force_threshold_spin = QSpinBox()
+        self._brute_force_threshold_spin.setRange(2, 100)
+        self._brute_force_threshold_spin.setValue(DEFAULT_ATTEMPT_THRESHOLD)
+        self._brute_force_threshold_spin.setToolTip(
+            "numarul de incercari de conectare (porturi sursa distincte) "
+            "catre acelasi serviciu, in fereastra de mai jos, care "
+            "declanseaza evenimentul"
+        )
+        form.addRow("Prag incercari:", self._brute_force_threshold_spin)
+
+        self._brute_force_window_spin = QSpinBox()
+        self._brute_force_window_spin.setRange(1, 3600)
+        self._brute_force_window_spin.setSuffix(" s")
+        self._brute_force_window_spin.setValue(int(DEFAULT_BRUTE_FORCE_WINDOW_SECONDS))
+        form.addRow("Fereastra:", self._brute_force_window_spin)
+
+        self._brute_force_ports_edit = QLineEdit(
+            ", ".join(str(p) for p in sorted(DEFAULT_BRUTE_FORCE_PORTS))
+        )
+        self._brute_force_ports_edit.setToolTip(
+            "servicii tinta pentru detectia de brute-force (ex: SSH 22, "
+            "FTP 21, Telnet 23, RDP 3389) - porturi separate prin virgula"
+        )
+        form.addRow("Porturi tinta:", self._brute_force_ports_edit)
+
+        return group
+
+    def brute_force_threshold(self) -> int:
+        return self._brute_force_threshold_spin.value()
+
+    def brute_force_window_seconds(self) -> float:
+        return float(self._brute_force_window_spin.value())
+
+    def brute_force_ports(self) -> set[int]:
+        return _parse_ports(self._brute_force_ports_edit.text())
+
+    # --- DNS tunneling ---
+
+    def _build_dns_tunneling_group(self) -> QGroupBox:
+        group = QGroupBox("DNS tunneling (etichete de subdomeniu suspecte)")
+        form = QFormLayout(group)
+
+        self._dns_min_length_spin = QSpinBox()
+        self._dns_min_length_spin.setRange(5, 63)
+        self._dns_min_length_spin.setValue(DEFAULT_MIN_LABEL_LENGTH)
+        self._dns_min_length_spin.setToolTip(
+            "lungimea minima a etichetei (partea dinaintea primului punct "
+            "din numele interogat) ca sa fie luata in calcul - etichete "
+            "scurte nu spun nimic statistic despre entropie"
+        )
+        form.addRow("Lungime minima:", self._dns_min_length_spin)
+
+        self._dns_min_entropy_spin = QDoubleSpinBox()
+        self._dns_min_entropy_spin.setRange(0.0, 6.0)
+        self._dns_min_entropy_spin.setSingleStep(0.1)
+        self._dns_min_entropy_spin.setValue(DEFAULT_MIN_ENTROPY)
+        self._dns_min_entropy_spin.setToolTip(
+            "entropie minima (biti/caracter) - text normal (nume alese de "
+            "oameni) e de regula sub 3.0; date encodate base32/base64/hex "
+            "(ce foloseste tunneling-ul) se apropie de 4+ - prag mai mic = "
+            "mai sensibil, mai multe fals-pozitive posibile"
+        )
+        form.addRow("Entropie minima:", self._dns_min_entropy_spin)
+
+        return group
+
+    def dns_min_label_length(self) -> int:
+        return self._dns_min_length_spin.value()
+
+    def dns_min_entropy(self) -> float:
+        return self._dns_min_entropy_spin.value()
+
+    # --- semnaturi malware in payload ---
+
+    def _build_payload_signatures_group(self) -> QGroupBox:
+        group = QGroupBox(f"Semnaturi malware in payload ({len(DEFAULT_PAYLOAD_SIGNATURES)} pattern-uri)")
+        layout = QVBoxLayout(group)
+
+        self._payload_signatures_checkbox = QCheckBox("activa (cauta pattern-uri cunoscute in payload)")
+        self._payload_signatures_checkbox.setChecked(True)
+        layout.addWidget(self._payload_signatures_checkbox)
+
+        hint_label = QLabel(
+            "LIMITARE REALA: functioneaza doar pe trafic NECRIPTAT - traficul "
+            "HTTPS/TLS (majoritatea traficului modern) ramane opac acestei "
+            "semnaturi, la fel ca oricarui NIDS bazat pe retea, nu doar acestuia"
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: #8a8a8a;")
+        layout.addWidget(hint_label)
+
+        return group
+
+    def payload_signatures_enabled(self) -> bool:
+        return self._payload_signatures_checkbox.isChecked()

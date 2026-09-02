@@ -147,8 +147,13 @@ def test_manual_block_event_can_be_analyzed_from_logs(tmp_path, monkeypatch):
     panel._inspector_dialogs[0].close()
 
 
-def test_log_analyze_requested_without_assessment_or_identity_shows_message(tmp_path):
+def test_log_analyze_requested_without_assessment_or_identity_shows_message(tmp_path, monkeypatch):
     _app()
+    shown = []
+    monkeypatch.setattr(
+        "nids.ui.widgets.dashboard_panel.QMessageBox.information",
+        lambda *a, **k: shown.append(a),
+    )
     panel = _make_panel(tmp_path)
     entry = StoredEvent(
         timestamp="2026-01-01T00:00:00",
@@ -160,4 +165,33 @@ def test_log_analyze_requested_without_assessment_or_identity_shows_message(tmp_
 
     panel._on_log_analyze_requested(entry)
 
-    assert "nu are o conexiune ML asociata" in panel._status_label.text()
+    assert len(shown) == 1
+
+
+def test_log_analyze_requested_with_dest_ip_but_no_src_port_shows_message(tmp_path, monkeypatch):
+    """regresie: brute-force/porturi sensibile salveaza dest_ip/dest_port
+    dar NU src_port (nu exista un singur port sursa asociat) - fara
+    aceasta verificare explicita, _analyze_connection() era apelat oricum
+    si esua mereu la potrivire, aratand un mesaj generic care parea
+    identic cu "nu se intampla nimic" cand userul dadea click pe Analizeaza"""
+    _app()
+    shown = []
+    monkeypatch.setattr(
+        "nids.ui.widgets.dashboard_panel.QMessageBox.information",
+        lambda *a, **k: shown.append(a),
+    )
+    panel = _make_panel(tmp_path)
+    panel._all_packets = ["nu ar trebui folosit"]  # nu trebuie sa ajunga aici deloc
+    entry = StoredEvent(
+        timestamp="2026-01-01T00:00:00",
+        event_type="brute-force",
+        source_ip="10.0.0.1",
+        severity="ridicata",
+        description="test",
+        dest_ip="10.0.0.2",
+        dest_port=22,
+    )
+
+    panel._on_log_analyze_requested(entry)
+
+    assert len(shown) == 1
