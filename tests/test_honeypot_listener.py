@@ -58,6 +58,8 @@ def test_connection_triggers_hit_with_correct_fields():
     assert hits[0].dst_port == port
     assert hits[0].src_ip == "127.0.0.1"
     assert hits[0].received_preview == "hello"
+    assert hits[0].bytes_received == 5
+    assert hits[0].duration >= 0.0
     assert errors == []
 
 

@@ -30,5 +30,10 @@ class MlSettings:
     max_buffer_size: int = MAX_BUFFER_SIZE
     contamination: float | None = None  # None = 'auto' (implicit sklearn)
     n_estimators: int = DEFAULT_N_ESTIMATORS  # numar de arbori Isolation Forest
-    strict_reporting: bool = False  # True = raporteaza doar cand ambele modele sunt de acord
+    # implicit True (schimbat dupa testare reala - vezi NOTES.md): fara
+    # strict mode, Loguri se umple repede cu flag-uri de la un singur
+    # model (adesea fals-pozitive), care ingreuneaza gasirea semnalelor de
+    # incredere mare. True = raporteaza doar cand ambele modele sunt de
+    # acord ca e un atac - semnalul cel mai increzator, mai putin zgomot
+    strict_reporting: bool = True
     evaluation_interval_ms: int = DEFAULT_EVALUATION_INTERVAL_MS

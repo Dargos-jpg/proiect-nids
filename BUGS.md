@@ -224,3 +224,68 @@ amenintare realist (atacator de pe ALTA masina din retea) nu e afectat.
 test cross-device real (alt dispozitiv din retea) ar fi confirmarea
 definitiva, dar nu a mai fost necesar - userul s-a declarat multumit de
 diagnostic.
+
+## test cu semnatura de fake veche, ratat la un lot anterior de modificari
+
+la rularea completa a suitei de teste inainte de sesiunea de honeypot ->
+reantrenare, `tests/test_dashboard_simulation.py::test_simulate_while_monitoring_runs_and_updates_status`
+esua cu `_idle_capture() got an unexpected keyword argument 'on_arp'`.
+
+cauza: exact tiparul deja documentat de "drift de semnatura" (vezi NOTES.md,
+sectiunea semnaturi noi) - de fiecare data cand `capture_live()`/
+`LiveCaptureThread` a capatat un parametru optional nou (`on_arp`, `on_dns`,
+`on_payload`), toate fake-urile din teste cu semnatura fixa trebuiau
+actualizate manual. `test_live_capture_thread.py`, `test_dashboard_live_monitoring.py`
+si `test_dashboard_ml_settings.py` fusesera actualizate la momentul respectiv,
+dar `test_dashboard_simulation.py::_idle_capture()` a fost ratat din lot.
+
+fix: adaugat `on_arp=None, on_dns=None, on_payload=None` la semnatura
+`_idle_capture()`, la fel ca la celelalte fake-uri. gasit prin rularea
+suitei complete (423 teste) inainte de commit, nu prin testare manuala -
+util de retinut: dupa orice schimbare de semnatura pe o functie cu multe
+fake-uri de test, merita cautat explicit toate locurile care o inlocuiesc
+(`grep` dupa numele functiei), nu doar cele deja stiute.
+
+## bug prins la scrierea testelor (nu la testare manuala): banner grab cu doua conexiuni separate la scanner-ul de vulnerabilitati
+
+la implementarea `scan_host()` (nids/scanner/vulnerability_scan.py), prima
+varianta facea DOUA conexiuni TCP separate per port deschis: una pentru
+`connect_ex()` (doar ca sa verifice ca portul e deschis, apoi inchisa
+imediat), si una noua, separata, pentru `_grab_banner()`.
+
+testul `test_scan_host_finds_open_port_with_banner` (server de test simplu,
+`socket.listen(1)`, accepta o singura conexiune si trimite banner-ul) a
+esuat cu banner gol - desi serverul de test CHIAR trimitea banner-ul.
+
+cauza: cu backlog=1, cele doua conexiuni separate (verificare + banner)
+ajung intercalate nedeterminist in coada de accept a serverului - server-ul
+accepta oricare ajunge prima (adesea cea de verificare, deja inchisa de
+client pana apuca sa trimita ceva), iar a doua conexiune (cea reala, pentru
+banner) poate fi refuzata sau ignorata. cu alte cuvinte: comportamentul
+depindea de o cursa intre doua conexiuni, nu de logica aplicatiei.
+
+fix: banner-ul se citeste acum pe ACEEASI conexiune care a confirmat ca
+portul e deschis (`_read_banner(sock)` primeste socket-ul deja conectat),
+nu se mai deschide o a doua conexiune deloc - mai eficient (jumatate din
+conexiuni) SI corect (nicio cursa posibila). exact genul de bug pe care
+scrierea testelor cu un server real (nu un mock) l-a scos la iveala inainte
+sa ajunga cod livrat - testul a fost cel care a gasit problema, nu userul.
+
+## inca doua fake-uri de captura cu semnatura veche, ratate la acelasi lot de modificari
+
+dupa ce schimbarea `strict_reporting` implicit (NOTES.md) a scos la iveala
+un test picat (`test_dashboard_live_ml.py::test_ml_tick_adds_event_to_dashboard`,
+fix real - vezi NOTES.md), am cautat explicit (`grep def _idle_capture`) alte
+locuri cu acelasi tipar de "drift de semnatura" documentat mai devreme (vezi
+mai sus, "test cu semnatura de fake veche").
+
+gasite doua in plus, nedeclansand nicio eroare vizibila pana acum: `_idle_capture()`
+din `test_dashboard_live_ml.py` si din `test_dashboard_shutdown.py`, ambele
+fara `on_arp=None, on_dns=None, on_payload=None`. nu esuau explicit pentru ca
+`LiveCaptureThread.run()` prinde orice exceptie si o transforma in semnalul
+`error` (nimeni nu asertat pe el in aceste teste) - eroarea de semnatura era
+"inghitita" tacut, nu vizibila in rezultatul testului.
+
+fix: adaugate cele trei parametri lipsa la ambele. lectie confirmata:
+cautarea explicita dupa nume de functie, nu doar fixarea locului unde a picat
+un test, gaseste probleme latente inainte sa produca o eroare vizibila.

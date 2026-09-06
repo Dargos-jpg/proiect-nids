@@ -8,10 +8,12 @@ from nids.response.manager import BlockManager
 from nids.storage.event_store import EventStore
 from nids.ui.theme import DARK_STYLESHEET
 from nids.ui.widgets.dashboard_panel import DashboardPanel
+from nids.ui.widgets.forensics_panel import ForensicsPanel
 from nids.ui.widgets.honeypot_panel import HoneypotPanel
 from nids.ui.widgets.logs_panel import LogsPanel
 from nids.ui.widgets.ml_panel import MlPanel
 from nids.ui.widgets.response_panel import ResponsePanel
+from nids.ui.widgets.scanner_panel import ScannerPanel
 from nids.ui.widgets.signatures_panel import SignaturesPanel
 from nids.ui.widgets.traffic_panel import TrafficPanel
 
@@ -28,10 +30,12 @@ class MainWindow(QMainWindow):
         self._event_store = EventStore()
         self._signatures_panel = SignaturesPanel()
         self._traffic_panel = TrafficPanel()
+        self._forensics_panel = ForensicsPanel()
         self._logs_panel = LogsPanel(self._event_store)
         self._ml_settings = MlSettings()
         self._response_settings = ResponseSettings()
         self._honeypot_panel = HoneypotPanel(self._event_store)
+        self._scanner_panel = ScannerPanel(self._event_store)
 
         # zona centrala, ca "Scene" in Unity - vederea principala de lucru
         self._dashboard = DashboardPanel(
@@ -42,6 +46,7 @@ class MainWindow(QMainWindow):
             self._logs_panel,
             self._ml_settings,
             self._response_settings,
+            self._forensics_panel,
         )
         self.setCentralWidget(self._dashboard)
 
@@ -79,6 +84,13 @@ class MainWindow(QMainWindow):
             min_width=right_dock_min_width,
         )
         self._add_dock(
+            "Scanner",
+            self._scanner_panel,
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            tabify_with="Semnaturi",
+            min_width=right_dock_min_width,
+        )
+        self._add_dock(
             "Loguri",
             self._logs_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
@@ -87,6 +99,13 @@ class MainWindow(QMainWindow):
         self._add_dock(
             "Trafic",
             self._traffic_panel,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+            tabify_with="Loguri",
+            min_height=120,
+        )
+        self._add_dock(
+            "Forensics",
+            self._forensics_panel,
             Qt.DockWidgetArea.BottomDockWidgetArea,
             tabify_with="Loguri",
             min_height=120,
@@ -152,6 +171,7 @@ class MainWindow(QMainWindow):
         # de user: sqlite3.ProgrammingError: Cannot operate on a closed database)
         self._logs_panel.stop()
         self._honeypot_panel.stop()
+        self._scanner_panel.stop()
         self._block_manager.shutdown()
         self._event_store.close()
         super().closeEvent(event)

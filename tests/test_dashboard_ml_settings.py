@@ -85,13 +85,17 @@ def test_start_monitoring_applies_configured_ml_settings(tmp_path, monkeypatch):
     _wait_until(app, lambda: panel._thread is None)
 
 
-def test_start_monitoring_with_default_settings_matches_previous_behavior(tmp_path, monkeypatch):
+def test_start_monitoring_with_default_settings_matches_current_defaults(tmp_path, monkeypatch):
+    """strict_reporting implicit True (schimbat dupa testare reala - vezi
+    NOTES.md): fara el, Loguri se umple cu flag-uri de la un singur model,
+    care ingreuneaza gasirea semnalelor de incredere mare (ambele modele
+    de acord)"""
     app = _app()
     panel = _make_panel(tmp_path, monkeypatch, MlSettings())
 
     panel._start_monitoring()
 
-    assert panel._live_hybrid._strict_reporting is False
+    assert panel._live_hybrid._strict_reporting is True
     manager = panel._live_hybrid.local_manager
     assert manager._contamination is None
     assert manager._n_estimators == 100

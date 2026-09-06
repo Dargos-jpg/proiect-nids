@@ -35,6 +35,7 @@ class TrafficPanel(QWidget):
     sesiunile lungi de monitorizare sa nu incetineasca UI-ul"""
 
     analyze_requested = Signal(object)  # emite PacketMeta-ul randului selectat
+    reconstruct_requested = Signal(object)  # idem, pentru reconstructia conexiunii
 
     def __init__(self) -> None:
         super().__init__()
@@ -130,6 +131,8 @@ class TrafficPanel(QWidget):
             return
 
         menu = QMenu(self)
-        action = menu.addAction("Analizeaza aceasta conexiune cu ML")
-        action.triggered.connect(lambda: self.analyze_requested.emit(pkt))
+        analyze_action = menu.addAction("Analizeaza aceasta conexiune cu ML")
+        analyze_action.triggered.connect(lambda: self.analyze_requested.emit(pkt))
+        reconstruct_action = menu.addAction("Reconstruieste conexiunea completa")
+        reconstruct_action.triggered.connect(lambda: self.reconstruct_requested.emit(pkt))
         menu.exec(self._table.viewport().mapToGlobal(position))

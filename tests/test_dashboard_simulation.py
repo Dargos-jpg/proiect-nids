@@ -34,7 +34,9 @@ def _make_panel(tmp_path: Path, monkeypatch) -> DashboardPanel:
     )
 
 
-def _idle_capture(on_packet, interface=None, stop_event=None):
+def _idle_capture(
+    on_packet, on_arp=None, on_dns=None, on_payload=None, interface=None, stop_event=None
+):
     while stop_event is not None and not stop_event.is_set():
         time.sleep(0.02)
 

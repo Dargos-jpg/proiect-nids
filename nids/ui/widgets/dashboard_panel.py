@@ -21,7 +21,7 @@ from nids.capture.arp_meta import ArpFrame
 from nids.capture.dns_meta import DnsQuery
 from nids.capture.packet_meta import PacketMeta
 from nids.capture.pcap_reader import read_pcap
-from nids.capture.payload_meta import PayloadSample
+from nids.capture.payload_meta import PayloadSample, read_pcap_payload_samples
 from nids.core.analysis import ScanUpdate, StreamAnalyzer, analyze_pcap
 from nids.core.event import Event, Severity
 from nids.core.hybrid_analysis import analyze_pcap_hybrid
@@ -43,6 +43,7 @@ from nids.storage.event_store import EventStore, StoredEvent
 from nids.ui.live_capture_thread import LiveCaptureThread
 from nids.ui.simulation_thread import SimulationThread
 from nids.ui.widgets.connection_inspector import ConnectionInspectorDialog
+from nids.ui.widgets.forensics_panel import ConnectionTimelineDialog, ForensicsPanel, packets_for_connection
 from nids.ui.widgets.logs_panel import LogsPanel
 from nids.ui.widgets.signatures_panel import SignaturesPanel
 from nids.ui.widgets.traffic_chart import TrafficChartPanel
@@ -72,6 +73,7 @@ class DashboardPanel(QWidget):
         logs_panel: LogsPanel,
         ml_settings: MlSettings | None = None,
         response_settings: ResponseSettings | None = None,
+        forensics_panel: ForensicsPanel | None = None,
     ) -> None:
         super().__init__()
         self._block_manager = block_manager
@@ -79,7 +81,9 @@ class DashboardPanel(QWidget):
         self._signatures_panel = signatures_panel
         self._traffic_panel = traffic_panel
         self._traffic_panel.analyze_requested.connect(self._on_traffic_analyze_requested)
+        self._traffic_panel.reconstruct_requested.connect(self._on_traffic_reconstruct_requested)
         self._logs_panel = logs_panel
+        self._forensics_panel = forensics_panel
         self._logs_panel.analyze_requested.connect(self._on_log_analyze_requested)
         self._ml_settings = ml_settings if ml_settings is not None else MlSettings()
         self._response_settings = (
@@ -134,6 +138,7 @@ class DashboardPanel(QWidget):
         self._event_items: dict[tuple[str, str], QListWidgetItem] = {}
         self._all_packets: list[PacketMeta] = []
         self._inspector_dialogs: list[ConnectionInspectorDialog] = []
+        self._timeline_dialogs: list[ConnectionTimelineDialog] = []
         self._expert_model = self._try_load_expert_model()
 
         self._ml_timer = QTimer(self)
@@ -172,6 +177,8 @@ class DashboardPanel(QWidget):
 
         self._all_packets = read_pcap(path)
         self._traffic_panel.load_packets(self._all_packets)
+        if self._forensics_panel is not None:
+            self._forensics_panel.load_samples(read_pcap_payload_samples(path))
 
         threshold = self._signatures_panel.threshold()
         window = self._signatures_panel.window_seconds()
@@ -233,6 +240,8 @@ class DashboardPanel(QWidget):
         self._event_items = {}
         self._traffic_panel.clear()
         self._traffic_chart.clear()
+        if self._forensics_panel is not None:
+            self._forensics_panel.clear()
         self._all_packets = []
         self._stream_analyzer = StreamAnalyzer(
             port_scan_threshold=self._signatures_panel.threshold(),
@@ -355,6 +364,8 @@ class DashboardPanel(QWidget):
             self._traffic_chart.record_event(event.severity)
 
     def _on_live_payload_sample(self, sample: PayloadSample) -> None:
+        if self._forensics_panel is not None:
+            self._forensics_panel.add_sample(sample)
         if self._payload_tracker is None:
             return
         event = self._payload_tracker.process_sample(sample)
@@ -506,6 +517,21 @@ class DashboardPanel(QWidget):
 
     def _on_traffic_analyze_requested(self, pkt: PacketMeta) -> None:
         self._analyze_connection(pkt.src_ip, pkt.src_port, pkt.dst_ip, pkt.dst_port, pkt.protocol)
+
+    def _on_traffic_reconstruct_requested(self, pkt: PacketMeta) -> None:
+        """"packet forensics": spre deosebire de analiza ML (features
+        agregate), aici arati userului fluxul BRUT, pachet cu pachet, al
+        conexiunii complete - nu are nevoie de niciun model, doar de
+        _all_packets, deja pastrat pentru sesiunea curenta"""
+        matches = packets_for_connection(self._all_packets, pkt)
+        if not matches:
+            self._status_label.setText("nu s-au gasit alte pachete pentru aceasta conexiune")
+            return
+        dialog = ConnectionTimelineDialog(matches, pkt, parent=self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._timeline_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._timeline_dialogs.remove(dialog))
+        dialog.show()
 
     def _on_log_analyze_requested(self, entry: StoredEvent) -> None:
         """analog cu analiza din Trafic, dar pornind de la un rand din

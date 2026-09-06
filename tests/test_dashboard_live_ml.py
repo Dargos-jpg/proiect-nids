@@ -4,6 +4,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from nids.capture.packet_meta import PacketMeta
+from nids.core.ml_settings import MlSettings
 from nids.response.manager import BlockManager
 from nids.storage.event_store import EventStore
 from nids.ui.widgets.dashboard_panel import DashboardPanel
@@ -19,7 +20,7 @@ def _app() -> QApplication:
     return app
 
 
-def _make_panel(tmp_path: Path, monkeypatch) -> DashboardPanel:
+def _make_panel(tmp_path: Path, monkeypatch, ml_settings: MlSettings | None = None) -> DashboardPanel:
     # altfel LocalModelManager.load_or_new() ar citi/scrie calea reala
     # de pe disc, facand testele nedeterministe intre rulari
     monkeypatch.setattr(
@@ -32,6 +33,7 @@ def _make_panel(tmp_path: Path, monkeypatch) -> DashboardPanel:
         SignaturesPanel(),
         TrafficPanel(),
         LogsPanel(event_store),
+        ml_settings=ml_settings,
     )
 
 
@@ -47,7 +49,9 @@ def _packet(dst_port: int) -> PacketMeta:
     )
 
 
-def _idle_capture(on_packet, interface=None, stop_event=None):
+def _idle_capture(
+    on_packet, on_arp=None, on_dns=None, on_payload=None, interface=None, stop_event=None
+):
     """nu genereaza pachete singura - testul le trimite manual prin
     _on_live_packet, doar sta pana e oprita, ca un thread real"""
     while stop_event is not None and not stop_event.is_set():
@@ -65,7 +69,13 @@ def _wait_until(app: QApplication, condition, timeout: float = 5.0) -> None:
 def test_ml_tick_adds_event_to_dashboard(tmp_path, monkeypatch):
     """simuleaza o conexiune, forteaza predictia expert la 'atac' si
     verifica ca evaluarea ML periodica ajunge in lista din Dashboard,
-    nu doar in logica interna a LiveHybridAnalyzer"""
+    nu doar in logica interna a LiveHybridAnalyzer.
+
+    strict_reporting=False explicit: scenariul testat aici (expert singur
+    semnaleaza, modelul local inca invata) NU e BOTH_ATTACK - cu
+    strict_reporting implicit (True, schimbat dupa testare reala, vezi
+    NOTES.md) ar fi suprimat, si acest test verifica exact plumbing-ul
+    pentru cazul permisiv, nu comportamentul implicit"""
     app = _app()
     monkeypatch.setattr("nids.ui.live_capture_thread.capture_live", _idle_capture)
     monkeypatch.setattr(
@@ -74,7 +84,7 @@ def test_ml_tick_adds_event_to_dashboard(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("nids.core.live_hybrid.explain_connection", lambda expert, record: [])
 
-    panel = _make_panel(tmp_path, monkeypatch)
+    panel = _make_panel(tmp_path, monkeypatch, MlSettings(strict_reporting=False))
     panel._expert_model = object()  # doar ca sa nu fie None
 
     panel._start_monitoring()

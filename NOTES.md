@@ -707,6 +707,297 @@ implementate impreuna cu un istoric de blocari in Raspuns.
   - ResponsePanel are acum un al doilea tabel sub cel de blocari active,
     cele mai recente intai
 
+## honeypot -> reantrenare model expert (a doua idee ramasa deschisa, dupa ce roadmap-ul de baza s-a incheiat)
+
+CONTEXT-nids.md (versiunea mai veche, ramificata) mentiona ideea ca honeypot-ul
+sa devina sursa de date reale pentru reantrenarea modelului expert, in loc de
+doar NSL-KDD static - notat ca "neimplementat inca" in sectiunea honeypot de
+mai sus. userul a cerut acum sa o construim.
+
+problema de rezolvat: honeypot-ul (`nids/honeypot/listener.py`) e un socket
+de ascultare simplu - stie doar src_ip/porturi/preview text, nu are acces la
+pachetele brute de retea si deci nu poate produce direct cele 28 de features
+NSL-KDD-style asteptate de model.
+
+solutie, cu reutilizare maxima a pipeline-ului existent, in loc de un
+extractor de features separat doar pentru honeypot:
+
+- **`HoneypotHit`** (nids/honeypot/listener.py) are acum si `bytes_received`
+  si `duration` (ambele cu default, backward compatibil) - masurate in
+  `_handle_connection()` cu `time.monotonic()` in jurul citirii socketului
+- **`nids/honeypot/training_data.py`** (nou) - `hit_to_packets()` reconstruieste
+  o interactiune honeypot ca o secventa MICA de `PacketMeta` sintetice (SYN,
+  SYN-ACK, eventual un pachet cu datele primite, FIN) - NU pachete reale, doar
+  suficient de plauzibile ca `extract_nsl_kdd_style_features()` (ACELASI
+  extractor folosit pentru trafic real capturat) sa produca un record complet
+  cu toate cele 28 de features, fara cod nou de extragere. toate interactiunile
+  folosesc un `dst_ip` placeholder comun (`HONEYPOT_HOST_IP`) - corect
+  semantic, honeypot-ul chiar RULEAZA pe o singura masina, deci statisticile
+  per-destinatie din TrafficWindowTracker reflecta realitatea (multi atacatori,
+  aceeasi "gazda")
+  - `HoneypotTrainingStore` - acumuleaza sesiunile (liste de pachete) pe disc
+    intre pornirile aplicatiei, la fel ca LocalModelManager - fara asta ar
+    trebui sa lasi honeypot-ul sa colecteze ore intregi intr-o singura rulare
+- **`nids/ml/expert/retrain.py`** (nou) - `retrain_with_honeypot_data()`:
+  incarca NSL-KDD normal, antreneaza un RandomForest BASELINE (ca sa masuram
+  acuratetea "inainte"), apoi adauga peste `x_train` conexiunile honeypot
+  (encodate cu `encode_features()`, aliniate pe coloanele din train) -
+  etichetate INTOTDEAUNA "atac" (label=1), fara exceptie, spre deosebire de
+  restul aplicatiei unde exista mereu risc de fals-pozitiv - antreneaza un
+  al doilea RandomForest pe setul combinat, evalueaza tot pe KDDTest+ (acelasi
+  test set, comparatie corecta), face un backup `.bak` al modelului anterior
+  INAINTE sa suprascrie `data/models/expert_random_forest.joblib` - reantrenarea
+  trebuie sa fie la fel de reversibila ca o blocare de IP, nu o operatie
+  definitiva pe modelul deja validat
+- **`RetrainThread`** (nids/ui/retrain_thread.py) - subclasare QThread directa,
+  acelasi tipar ca toate celelalte thread-uri din proiect - antrenarea a DOUA
+  RandomForest-uri poate dura cateva secunde, nu trebuie sa inghete UI-ul
+- **HoneypotPanel**: buton nou "Reantreneaza modelul expert cu date honeypot",
+  activat doar peste `MIN_HONEYPOT_SAMPLES` (10, prag arbitrar, ca la modelul
+  local) conexiuni acumulate, cu `QMessageBox.question()` de confirmare
+  explicita inainte (actiune care schimba modelul activ, nu ceva de facut din
+  greseala la un click), si status cu acuratetea inainte/dupa dupa terminare
+- **capcana prinsa la scriere, inainte sa ajunga bug real**: `finished` (semnalul
+  automat QThread) se emite DUPA `succeeded`/`failed` - handler-ul generic de
+  "thread terminat" nu trebuie sa mai apeleze acelasi cod care seteaza textul
+  de status, altfel suprascrie mesajul cu acuratetea rezultata cu un text
+  generic - exact tiparul de bug deja gasit o data la honeypot cu
+  `_had_bind_error` (vezi BUGS.md), de data asta prins inainte sa ajunga bug
+  vizibil pentru user
+
+teste noi: test_honeypot_training_data.py (hit_to_packets, persistenta
+HoneypotTrainingStore), test_expert_retrain.py (retrain_with_honeypot_data,
+cu un NSL-KDD "jucarie" scris in tmp_path, nu setul real de 150k randuri -
+acelasi principiu ca testele existente pe nsl_kdd.py), teste noi in
+test_honeypot_panel.py (prag, confirmare, RetrainThread inlocuit cu un fals
+in testele de UI - antrenarea reala nu trebuie sa ruleze intr-un test de widget).
+
+## packet forensics / analizator de trafic avansat (a treia idee ramasa deschisa)
+
+a treia idee mentionata in CONTEXT-nids.md (versiunea ramificata) ca extensie
+viitoare - o vedere mai adanca decat "Trafic" (metadate) sau analiza ML
+(features agregate): fluxul BRUT, pachet cu pachet, al unei conexiuni, plus
+inspectia continutului efectiv (hex dump) cand exista.
+
+doua capabilitati noi, ambele in `nids/ui/widgets/forensics_panel.py`:
+
+- **"Reconstruieste conexiunea completa"** - a doua optiune in meniul
+  contextual din Trafic (langa "Analizeaza aceasta conexiune cu ML").
+  `packets_for_connection()` (functie pura, usor de testat) filtreaza
+  `_all_packets` (deja pastrat pentru sesiunea curenta) dupa perechea de
+  capete + protocol, in ambele directii, sortat cronologic -
+  `ConnectionTimelineDialog` arata timpul relativ (+0.000s, +0.015s...),
+  directia (-> / <-), flag-urile TCP si dimensiunea fiecarui pachet. spre
+  deosebire de analiza ML (features agregate: duration/src_bytes/flag unic),
+  aici vezi exact SECVENTA de pachete - util sa intelegi "ce s-a intamplat
+  de fapt" intr-un schimb (ex: cate retransmisii, unde a picat conexiunea)
+- **hex dump pe payload** - `PayloadSample` (nids/capture/payload_meta.py)
+  contine deja octetii bruti (`payload: bytes`), captati pentru scanarea de
+  semnaturi malware, dar niciodata afisati userului pana acum. panoul nou
+  **Forensics** (dock nou, tabifiat cu Loguri/Trafic) le colecteaza intr-o
+  fereastra glisanta IN MEMORIE (`deque(maxlen=200)`) - NU persistate pe
+  disc, aceeasi decizie ca la semnaturile de payload (NOTES.md, sectiunea
+  "patru semnaturi noi"). dublu-click pe un rand deschide `HexDumpDialog`
+  (non-modal, ca ConnectionInspectorDialog) cu `hex_dump()` - format clasic
+  offset/hex/ascii, functie pura fara dependinte noi
+- DashboardPanel primeste `forensics_panel` ca parametru OPTIONAL (implicit
+  None) - la fel ca `ml_settings`/`response_settings` - ca sa nu strice
+  semnatura constructorului pentru toate testele existente care il
+  instantiaza direct fara acest panou
+- payload-urile ajung in Forensics din DOUA surse, ca sa functioneze si la
+  PCAP static si la monitorizare live: `_on_live_payload_sample()` (acelasi
+  loc unde ajunge deja la `PayloadSignatureTracker`) si `_on_load_clicked()`
+  (apel separat `read_pcap_payload_samples(path)`, in plus fata de
+  `analyze_pcap`/`analyze_pcap_hybrid` care il citesc oricum intern pentru
+  semnaturi - acelasi tipar deja existent, `_all_packets = read_pcap(path)`
+  re-citeste si el fisierul separat de `analyze_pcap`)
+
+teste noi: test_forensics_panel.py (hex_dump, packets_for_connection,
+ForensicsPanel, ConnectionTimelineDialog - constructie fara `.show()`/`.exec()`
+real, la fel ca la ConnectionInspectorDialog), test_dashboard_forensics.py
+(cablarea in DashboardPanel), plus teste noi in test_traffic_panel.py pentru
+semnalul `reconstruct_requested`. 442 teste in total dupa acest lot.
+
+## scanner de vulnerabilitati (a patra si ultima idee din lista ramasa deschisa)
+
+diferit de restul aplicatiei: pana acum totul e detectie PASIVA (analizeaza
+trafic care exista deja). un scanner de porturi/vulnerabilitati e prima
+componenta ACTIVA - initiaza el insusi conexiuni catre alte masini, ca sa
+descopere ce servicii asculta. decizii de scop, luate explicit ca sa ramana
+un instrument defensiv/de audit propriu, nu ceva ce ar putea fi confundat
+cu un tool de recunoastere:
+
+- **STRICT limitat la reteaua privata proprie** - `is_scannable_target()`
+  (nids/scanner/vulnerability_scan.py) foloseste `ipaddress.ip_address(host).is_private`
+  - orice adresa publica e refuzata cu `ValueError`, atat in `scan_host()`
+  cat si in `scan_targets()` (care valideaza TOATE tintele INAINTE sa
+  inceapa scanarea, nu doar sare peste cele gresite - un singur IP public
+  intr-o lista respinge tot apelul). acelasi principiu ca `nids/core/simulation.py`,
+  care tinteste explicit doar propriul IP din reteaua locala
+- **tinte explicite, introduse de user** - NU descoperire automata a
+  intregii retele (nu se face ping sweep pe un /24 intreg) - human-in-the-loop,
+  la fel ca blocarea manuala de IP, nu un "network mapper" automat
+- **scanare TCP connect simpla** (`connect_ex()`, conexiune completa) - NU
+  SYN stealth scan sau alte tehnici de evaziune, nimic ascuns. aceeasi
+  tehnica de baza ca `Test-NetConnection`/telnet
+- **note de risc STATICE, per protocol** (`_KNOWN_RISKS` - dict port ->
+  text), NU o baza de date de CVE-uri reala - ar cere o sursa externa/API
+  de internet plus potrivire exacta de versiune de software, greu de facut
+  corect fara o sursa de date live intretinuta constant. scop: semnaleaza
+  "acest tip de serviciu are riscuri cunoscute daca e expus" (SMB/RDP/
+  Telnet/FTP/VNC/etc.), nu un raport de securitate complet
+- banner grab REFOLOSESTE aceeasi conexiune care a confirmat ca portul e
+  deschis, nu deschide una noua separat - **bug prins la scrierea testelor,
+  nu presupus**: o a doua conexiune separata poate ajunge intercalata/
+  refuzata de un server cu backlog mic, banner-ul se pierdea in mod
+  nedeterminist (vezi BUGS.md)
+- rezultatele se salveaza in EventStore ca orice alta sursa (`event_type
+  = "scanare vulnerabilitati"`) - severitate MEDIUM daca portul are un risc
+  cunoscut, LOW altfel - vizibile si cautabile din Loguri ca orice eveniment
+
+`ScannerPanel` (nou, self-continut, acelasi tipar ca HoneypotPanel) + `ScanThread`
+(QThread, acelasi tipar ca toate celelalte thread-uri din proiect). dock nou
+"Scanner", tabifiat cu Semnaturi/ML/Raspuns/Honeypot. `ScannerPanel.stop()`
+asteapta sincron thread-ul la inchiderea aplicatiei - proactiv, nu dupa ce
+un user ar fi gasit bug-ul: acelasi tipar de cursa ca la LogsPanel (salvare
+intr-un EventStore deja inchis), evitat de data asta INAINTE sa ajunga bug
+vizibil.
+
+teste noi: test_vulnerability_scan.py (is_scannable_target, scan_host cu un
+server real pe 127.0.0.1 si port liber descoperit dinamic, scan_targets,
+event_from_scan_result), test_scanner_panel.py (parsare tinte, ScanThread
+inlocuit cu un fals in testele de UI, la fel ca la honeypot/reantrenare).
+459 teste in total dupa acest lot - toate cele 4 idei ramase din roadmap-ul
+extins (honeypot -> reantrenare, packet forensics, scanner de vulnerabilitati)
+sunt acum implementate.
+
+## fereastra glisanta a modelului local: 2000 -> 10000 conexiuni
+
+user a observat 60000+ PACHETE in doar 2 ore de monitorizare live si s-a
+intrebat daca bufferul modelului local (MAX_BUFFER_SIZE) n-ar trebui marit.
+clarificare importanta: bufferul tine CONEXIUNI agregate (NslKddStyleFeatures),
+nu pachete brute - numarul real de conexiuni e mult mai mic decat 60000, dar
+tot suficient cat sa "recicleze" o fereastra de 2000 destul de repede pe
+sesiuni lungi cu trafic de volum mare.
+
+verificat explicit ca cele doua praguri sunt independente: MIN_TRAINING_SAMPLES
+(cold start, 50) controleaza CAND incep predictiile, MAX_BUFFER_SIZE doar CAT
+de multa istorie se pastreaza dupa - marirea bufferului nu intarzie deloc
+inceperea predictiilor.
+
+cost de antrenare neschimbat practic: Isolation Forest foloseste
+`max_samples='auto'` = min(256, n) per arbore - indiferent de marimea
+bufferului, fiecare arbore vede tot un subesantion de 256. singurul cost
+real al unui buffer mai mare e adaptare mai lenta la schimbari legitime de
+trafic (concept drift) - deja o limitare cunoscuta si acceptata a
+proiectului, nu un risc nou introdus.
+
+`MAX_BUFFER_SIZE` (nids/ml/local/learning.py) ridicat de la 2000 la 10000 -
+era deja reglabil din panoul ML (interval 50-20000), dar `MlSettings()` nu
+se persista intre restart-uri ale aplicatiei, deci merita schimbata si
+valoarea implicita din cod, nu doar cea din UI.
+
+## strict_reporting implicit True (dupa testare reala cu scanner-ul de vulnerabilitati)
+
+user a testat scanner-ul de vulnerabilitati impotriva propriului router
+(192.168.1.1) si a observat Loguri umplandu-se cu multe randuri "atac (ambele
+modele de acord)" identice, plus alte semnaturi (port scan de la adrese
+externe reale). a cerut ca panoul ML sa porneasca implicit cu "raporteaza
+doar cand ambele modele sunt de acord" bifat (checkbox deja existent, doar
+neactivat implicit).
+
+clarificare facuta inainte de schimbare: NU e vorba de blocarea automata
+(ResponseSettings.auto_block_enabled, ramane opt-in - ar fi fost periculos
+sa se activeze implicit, ar fi blocat automat routerul userului chiar in
+testul din care a venit cererea). e vorba strict de FILTRAREA a ce se
+AFISEAZA in Loguri, `MlSettings.strict_reporting` - nicio actiune asupra
+retelei.
+
+schimbare: `MlSettings.strict_reporting` implicit `False` -> `True` -
+motivat de zgomotul real observat (multe flag-uri de la un singur model,
+care ingreuneaza gasirea semnalelor de incredere mare). `event_for_agreement()`
+cu strict=True raporteaza DOAR BOTH_ATTACK, restul (EXPERT_ONLY, LOCAL_ONLY,
+LOCAL_LEARNING+expert) sunt suprimate din Loguri (modelul local tot invata
+normal in fundal, doar decizia de RAPORTARE se schimba).
+
+test actualizat: `test_start_monitoring_with_default_settings_matches_previous_behavior`
+redenumit in `..._matches_current_defaults`, asertiunea schimbata din
+`is False` in `is True`. `test_ml_tick_adds_event_to_dashboard`
+(test_dashboard_live_ml.py) testeaza explicit scenariul PERMISIV (expert
+singur semnaleaza) - are acum nevoie de `MlSettings(strict_reporting=False)`
+explicit trimis la panel, altfel evenimentul testat ar fi suprimat de noul
+default si testul nu ar mai verifica ce trebuie.
+
+## observatie confirmata prin testare: scanner-ul de vulnerabilitati e vazut ca atac de ML - asteptat, nu bug
+
+user a scanat propriul router (192.168.1.1) cu noul scanner de vulnerabilitati
+si a observat ca traficul GENERAT DE SCANNER a fost flagat "atac (ambele
+modele de acord)" de mai multe ori.
+
+nu e un bug: scanner-ul face exact ce arata structural ca un port scan/atac -
+multe conexiuni TCP scurte, catre porturi diferite, aceeasi destinatie, intr-
+un interval scurt (`duration≈0`, `flag="S0"` pentru porturile ce nu raspund).
+identic structural cu problema deja investigata la "modelul local, faza 2"
+pentru butonul de simulare - un detector de anomalii pe trafic deliberat
+"anormal" (scanare) il recunoaste CORECT ca fiind diferit de trafic normal,
+chiar daca intentia din spate e benigna.
+
+de ce apare de mai multe ori identic: fiecare port scanat e o conexiune
+(tuplu 5 valori) DISTINCTA, evaluata separat de LiveHybridAnalyzer (dedup pe
+identitatea completa a conexiunii, nu doar sursa/destinatie) - daca mai multe
+porturi din scanare arata individual "suspect" structural, fiecare genereaza
+propriul eveniment. confirma, de fapt, ca aplicatia ar prinde un scanner real
+daca ar rula impotriva retelei userului.
+
+## poarta de siguranta la reantrenarea din honeypot: nu suprascrie modelul activ daca acuratetea scade
+
+user a intrebat un lucru important dupa prima testare reala a reantrenarii:
+datele honeypot chiar ajuta modelul expert, sau l-ar putea strica? raspuns
+onest: da, exista un risc real, si codul initial NU se apara de el.
+
+doua probleme identificate:
+1. pachetele sintetice generate din honeypot (`hit_to_packets()`) sunt
+   structural foarte OMOGENE - mereu `flag="SF"`, mereu `protocol="tcp"`,
+   `service` aproape mereu "other" (porturile honeypot 2222/8080 nu sunt in
+   tabelul de servicii cunoscute) - mult mai putin diverse decat atacurile
+   reale din NSL-KDD. un lot de exemple prea asemanatoare intre ele ar putea
+   ingusta ce a invatat modelul, nu doar sa il extinda
+2. **codul reantrena mereu de la zero pe NSL-KDD + honeypot si SALVA noul
+   model indiferent daca acuratetea pe KDDTest+ scadea fata de modelul
+   ACTIV curent** - arata cifrele in UI, dar nu opreau nimic. backup-ul .bak
+   exista, dar restaurarea era manuala - userul ar fi trebuit sa observe
+   singur regresia
+
+fix (`nids/ml/expert/retrain.py`):
+- `accuracy_before` acum se calculeaza evaluand MODELUL ACTIV CHIAR SALVAT
+  pe disc (`ExpertModel.load(model_out_path)`), NU un baseline nou-antrenat
+  doar din NSL-KDD ca inainte - comparatia corecta e cu ce ruleaza chiar
+  acum, care ar putea deja contine imbunatatiri dintr-o reantrenare
+  anterioara. beneficiu secundar: cand exista deja un model, nu se mai
+  antreneaza un RandomForest suplimentar doar pentru comparatie - un fit()
+  mai putin fata de varianta initiala
+- `_is_at_least_as_good(accuracy_before, accuracy_after)` - functie pura,
+  usor de testat fara ML real - daca noul model iese mai slab, `model_saved
+  = False` si NU se atinge deloc fisierul de pe disc (nici macar backup,
+  nu era nimic de suprascris)
+- cazul "niciun model activ inca" (prima reantrenare vreodata) ramane
+  neconditionat - nimic de "stricat", se salveaza mereu; se antreneaza
+  totusi un baseline NSL-KDD doar ca sa existe o cifra informativa in mesaj
+- `RetrainResult` are acum campul `model_saved: bool` - `HoneypotPanel`
+  arata un mesaj diferit cand reantrenarea NU a imbunatatit acuratetea
+  ("modelul activ NU a fost schimbat"), fara sa lase impresia gresita ca
+  s-a intamplat ceva
+
+teste noi: `_is_at_least_as_good` (3 teste, fara ML real), scenariile
+"fara model anterior -> salveaza mereu", "cu model anterior + imbunatatire
+-> salveaza si face backup", "cu model anterior + regresie -> NU salveaza,
+fisierul original ramane neschimbat byte-cu-byte" (ultimele doua forteaza
+rezultatul comparatiei prin monkeypatch pe `_is_at_least_as_good`, ca sa nu
+depinda de cum iese antrenarea reala pe date jucarie minuscule). fixture-ul
+"model anterior" a trecut de la octeti fictivi la un ExpertModel REAL salvat
+- codul acum chiar il incarca (`ExpertModel.load()`) ca sa il evalueze, nu
+doar ii verifica existenta fisierului.
+
 ## note tehnice minore
 
 - `python -m nids.ui.main` porneste un proces PARINTE care, la randul

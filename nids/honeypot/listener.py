@@ -3,6 +3,7 @@ from __future__ import annotations
 import selectors
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -27,6 +28,11 @@ class HoneypotHit:
     src_port: int
     dst_port: int
     received_preview: str  # ce a trimis clientul, truncat - doar afisare/log
+    # doua campuri noi, cu default ca sa nu strice apelurile/testele
+    # existente - folosite doar de nids/honeypot/training_data.py, ca sa
+    # reconstruim niste pachete sintetice plauzibile (vezi acolo)
+    bytes_received: int = 0
+    duration: float = 0.0
 
 
 class _HitCallback(Protocol):
@@ -116,6 +122,8 @@ def _handle_connection(
 ) -> None:
     src_ip, src_port = addr[0], addr[1]
     preview = ""
+    bytes_received = 0
+    start = time.monotonic()
     try:
         banner = _BANNERS.get(port, b"")
         if banner:
@@ -123,10 +131,21 @@ def _handle_connection(
         conn.settimeout(_CONNECTION_TIMEOUT)
         try:
             data = conn.recv(_MAX_READ_BYTES)
+            bytes_received = len(data)
             preview = data.decode("utf-8", errors="replace")
         except OSError:
             pass
     finally:
         conn.close()
+    duration = time.monotonic() - start
 
-    on_hit(HoneypotHit(src_ip=src_ip, src_port=src_port, dst_port=port, received_preview=preview))
+    on_hit(
+        HoneypotHit(
+            src_ip=src_ip,
+            src_port=src_port,
+            dst_port=port,
+            received_preview=preview,
+            bytes_received=bytes_received,
+            duration=duration,
+        )
+    )

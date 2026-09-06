@@ -172,3 +172,15 @@ def test_analyze_requested_signal_carries_the_packet():
     panel.analyze_requested.emit(pkt)
 
     assert received == [pkt]
+
+
+def test_reconstruct_requested_signal_carries_the_packet():
+    _app()
+    panel = TrafficPanel()
+    pkt = _packet("10.0.0.7")
+
+    received = []
+    panel.reconstruct_requested.connect(received.append)
+    panel.reconstruct_requested.emit(pkt)
+
+    assert received == [pkt]

@@ -4,14 +4,18 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from nids.honeypot.listener import HoneypotHit, event_from_honeypot_hit
+from nids.honeypot.training_data import HoneypotTrainingStore
+from nids.ml.expert.retrain import MIN_HONEYPOT_SAMPLES, RetrainResult
 from nids.storage.event_store import EventStore
 from nids.ui.honeypot_thread import HoneypotThread
+from nids.ui.retrain_thread import RetrainThread
 
 _DEFAULT_PORTS = "2222, 8080, 3306"
 
@@ -25,12 +29,16 @@ class HoneypotPanel(QWidget):
     de SignaturesPanel/MlSettings/ResponseSettings) - configurarea
     porturilor ramane locala, doar scrie in EventStore ca orice alta sursa"""
 
-    def __init__(self, event_store: EventStore) -> None:
+    def __init__(self, event_store: EventStore, training_store: HoneypotTrainingStore | None = None) -> None:
         super().__init__()
         self._event_store = event_store
         self._thread: HoneypotThread | None = None
         self._hits = 0
         self._had_bind_error = False
+        # injectabil pentru teste (tmp_path) - implicit persista pe disc,
+        # la fel ca DEFAULT_STATE_PATH la modelul local
+        self._training_store = training_store if training_store is not None else HoneypotTrainingStore()
+        self._retrain_thread: RetrainThread | None = None
 
         self._ports_edit = QLineEdit(_DEFAULT_PORTS)
         self._ports_edit.setToolTip(
@@ -58,10 +66,29 @@ class HoneypotPanel(QWidget):
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: #8a8a8a;")
 
+        self._retrain_button = QPushButton("Reantreneaza modelul expert cu date honeypot")
+        self._retrain_button.clicked.connect(self._on_retrain_clicked)
+
+        self._retrain_status_label = QLabel()
+        self._retrain_status_label.setWordWrap(True)
+        self._update_retrain_status()
+
+        retrain_hint = QLabel(
+            "fiecare conexiune la honeypot e etichetata automat drept atac "
+            "(niciun fals-pozitiv posibil aici) si adaugata peste setul static "
+            "NSL-KDD la reantrenare - modelul anterior e pastrat ca backup (.bak), "
+            "reantrenarea nu e o operatie definitiva"
+        )
+        retrain_hint.setWordWrap(True)
+        retrain_hint.setStyleSheet("color: #8a8a8a;")
+
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
         layout.addWidget(self._status_label)
         layout.addWidget(hint_label)
+        layout.addWidget(self._retrain_button)
+        layout.addWidget(self._retrain_status_label)
+        layout.addWidget(retrain_hint)
         layout.addStretch()
 
     def ports(self) -> list[int]:
@@ -133,11 +160,74 @@ class HoneypotPanel(QWidget):
     def _on_hit(self, hit: HoneypotHit) -> None:
         self._hits += 1
         self._event_store.save(event_from_honeypot_hit(hit))
+        self._training_store.add_hit(hit)
         self._status_label.setText(
             f"honeypot activ - {self._hits} conexiune(i) prinsa(e) pana acum "
             f"(ultima: {hit.src_ip} -> port {hit.dst_port})"
         )
+        self._update_retrain_status()
 
     def _on_bind_error(self, port: int, message: str) -> None:
         self._had_bind_error = True
         self._status_label.setText(f"nu s-a putut porni pe portul {port}: {message}")
+
+    def _update_retrain_status(self) -> None:
+        count = self._training_store.sample_count()
+        enabled = count >= MIN_HONEYPOT_SAMPLES and self._retrain_thread is None
+        self._retrain_button.setEnabled(enabled)
+        if count < MIN_HONEYPOT_SAMPLES:
+            self._retrain_status_label.setText(
+                f"{count}/{MIN_HONEYPOT_SAMPLES} conexiuni honeypot acumulate - "
+                "prea putine pentru o reantrenare cu semnal real"
+            )
+        elif self._retrain_thread is None:
+            self._retrain_status_label.setText(
+                f"{count} conexiuni honeypot acumulate - gata de reantrenare"
+            )
+
+    def _on_retrain_clicked(self) -> None:
+        count = self._training_store.sample_count()
+        confirmed = QMessageBox.question(
+            self,
+            "Reantreneaza modelul expert",
+            f"Reantrenezi modelul expert folosind cele {count} conexiuni honeypot "
+            "acumulate, peste setul static NSL-KDD? Modelul activ va fi inlocuit "
+            "(se pastreaza o copie de rezerva .bak). Poate dura cateva secunde.",
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        self._retrain_button.setEnabled(False)
+        self._retrain_status_label.setText("se reantreneaza modelul expert...")
+
+        self._retrain_thread = RetrainThread(self._training_store.packets())
+        self._retrain_thread.succeeded.connect(self._on_retrain_succeeded)
+        self._retrain_thread.failed.connect(self._on_retrain_failed)
+        self._retrain_thread.finished.connect(self._on_retrain_thread_finished)
+        self._retrain_thread.finished.connect(self._retrain_thread.deleteLater)
+        self._retrain_thread.start()
+
+    def _on_retrain_succeeded(self, result: RetrainResult) -> None:
+        if result.model_saved:
+            self._retrain_status_label.setText(
+                f"model reantrenat cu {result.honeypot_connections_used} conexiuni honeypot - "
+                f"acuratete pe KDDTest+: {result.accuracy_before:.4f} -> {result.accuracy_after:.4f}"
+            )
+        else:
+            self._retrain_status_label.setText(
+                f"reantrenare esuata sa imbunatateasca acuratetea "
+                f"({result.accuracy_before:.4f} -> {result.accuracy_after:.4f}) - "
+                "modelul activ NU a fost schimbat"
+            )
+
+    def _on_retrain_failed(self, message: str) -> None:
+        self._retrain_status_label.setText(f"reantrenare esuata: {message}")
+
+    def _on_retrain_thread_finished(self) -> None:
+        # NU reapelam _update_retrain_status() aici - ar suprascrie mesajul
+        # cu acuratetea inainte/dupa (setat de _on_retrain_succeeded/_failed)
+        # cu genericul "gata de reantrenare", exact bug-ul deja gasit o data
+        # la honeypot (mesaj util suprascris de handler-ul generic "terminat")
+        self._retrain_thread = None
+        count = self._training_store.sample_count()
+        self._retrain_button.setEnabled(count >= MIN_HONEYPOT_SAMPLES)

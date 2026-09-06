@@ -11,7 +11,17 @@ from nids.ml.local.model import LocalModel
 
 MIN_TRAINING_SAMPLES = 50
 RETRAIN_EVERY_N_SAMPLES = 25
-MAX_BUFFER_SIZE = 2000
+# 2000 (valoarea initiala) se "recicla" prea repede la sesiuni lungi si
+# trafic de volum mare (userul a observat 60000+ pachete in doar 2 ore) -
+# ridicat la 10000 CONEXIUNI (nu pachete - bufferul tine record-uri
+# NslKddStyleFeatures agregate, mult mai putine decat pachetele brute).
+# costul de antrenare nu creste practic deloc odata cu bufferul, pentru ca
+# Isolation Forest foloseste max_samples='auto' = min(256, n) per arbore -
+# indiferent daca bufferul are 2000 sau 10000, fiecare arbore tot vede doar
+# un subesantion de 256. singurul cost real e adaptare mai lenta la
+# schimbari legitime de trafic (concept drift) - deja o limitare cunoscuta
+# si acceptata a proiectului (vezi NOTES.md), nu un risc nou
+MAX_BUFFER_SIZE = 10000
 DEFAULT_N_ESTIMATORS = 100  # implicitul sklearn - vezi LocalModel.train()
 
 # subset de features numerice folosite pentru explicatia "cat de departe
