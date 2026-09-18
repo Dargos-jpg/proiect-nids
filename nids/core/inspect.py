@@ -87,6 +87,12 @@ def assessment_to_json(assessment: ConnectionAssessment) -> str:
     mai exista deja (traiesc doar in memorie cat ruleaza monitorizarea).
     nu salveaza `agreement` (enum, nefolosit de dialog) - restul e complet"""
     payload = {
+        # marcheaza schema blob-ului (vezi nids/ml/modern/inspect.py,
+        # modern_assessment_to_json) - blob-urile deja salvate pe disc, de
+        # dinainte de aceasta cheie, raman "old" implicit la citire
+        # (DashboardPanel._load_assessment_json foloseste .get("model", "old")),
+        # deci compatibilitatea retroactiva nu se rupe
+        "model": "old",
         "record": asdict(assessment.record),
         "expert_prediction": assessment.expert_prediction,
         "expert_top_features": [asdict(f) for f in assessment.expert_top_features],

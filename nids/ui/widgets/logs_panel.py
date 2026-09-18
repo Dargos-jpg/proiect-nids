@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from nids.core.report import save_report
 from nids.storage.event_store import EventStore, StoredEvent
+from nids.ui.widgets.log_entry_details import LogEntryDetailsDialog
 
 _COLUMNS = ["timp", "tip", "sursa", "severitate", "descriere"]
 _REFRESH_INTERVAL_MS = 2000
@@ -68,6 +69,8 @@ class LogsPanel(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_context_menu)
+        self._table.doubleClicked.connect(self._on_row_double_clicked)
+        self._detail_dialogs: list[LogEntryDetailsDialog] = []
 
         layout = QVBoxLayout(self)
         layout.addLayout(filter_bar)
@@ -207,6 +210,27 @@ class LogsPanel(QWidget):
             return
 
         menu = QMenu(self)
-        action = menu.addAction("Analizeaza aceasta conexiune cu ML")
-        action.triggered.connect(lambda: self.analyze_requested.emit(entry))
+        details_action = menu.addAction("Vezi detalii complete")
+        details_action.triggered.connect(lambda: self._open_details(entry))
+        analyze_action = menu.addAction("Analizeaza aceasta conexiune cu ML")
+        analyze_action.triggered.connect(lambda: self.analyze_requested.emit(entry))
         menu.exec(self._table.viewport().mapToGlobal(position))
+
+    def _on_row_double_clicked(self, index) -> None:
+        item = self._table.item(index.row(), 0)
+        if item is None:
+            return
+        entry = item.data(Qt.ItemDataRole.UserRole)
+        if entry is not None:
+            self._open_details(entry)
+
+    def _open_details(self, entry: StoredEvent) -> None:
+        """"vezi detalii complete" - spre deosebire de "Analizeaza cu ML"
+        (doar pentru evenimente cu identitate ML), functioneaza pentru
+        ORICE rand - cerut de user dupa o sesiune cu multe evenimente de
+        port scan, ale caror descrieri (liste de porturi) erau taiate in
+        celula tabelului"""
+        dialog = LogEntryDetailsDialog(entry, parent=self)
+        self._detail_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._detail_dialogs.remove(dialog))
+        dialog.show()

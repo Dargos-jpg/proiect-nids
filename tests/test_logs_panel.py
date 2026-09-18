@@ -318,3 +318,55 @@ def test_no_selection_stays_empty_after_refresh(tmp_path):
     panel._refresh_table()
 
     assert panel._table.selectedItems() == []
+
+
+# --- vezi detalii complete (orice rand, nu doar cele analizabile ML) ---
+
+
+def test_double_click_opens_details_dialog(tmp_path, monkeypatch):
+    """la fel ca la ConnectionInspectorDialog/QMenu - nu lasam un dialog
+    real sa apara pe ecran in timpul testelor"""
+    _app()
+    monkeypatch.setattr(
+        "nids.ui.widgets.logs_panel.LogEntryDetailsDialog.show", lambda self: None
+    )
+    store = EventStore(tmp_path / "test.db")
+    store.save(_event("10.0.0.1"))
+    panel = LogsPanel(store)
+
+    index = panel._table.model().index(0, 0)
+    panel._on_row_double_clicked(index)
+
+    assert len(panel._detail_dialogs) == 1
+    panel._detail_dialogs[0].close()
+
+
+def test_double_click_below_last_row_does_nothing(tmp_path):
+    _app()
+    store = EventStore(tmp_path / "test.db")
+    store.save(_event("10.0.0.1"))
+    panel = LogsPanel(store)
+
+    # index invalid (fara item la acel rand) nu trebuie sa arunce
+    panel._on_row_double_clicked(panel._table.model().index(5, 0))
+
+    assert panel._detail_dialogs == []
+
+
+def test_open_details_works_for_signature_event_without_ml_identity(tmp_path, monkeypatch):
+    """port scan (si alte semnaturi) nu au identitate ML (dest_ip=None) -
+    spre deosebire de "Analizeaza cu ML", "vezi detalii" trebuie sa
+    functioneze oricum"""
+    _app()
+    monkeypatch.setattr(
+        "nids.ui.widgets.logs_panel.LogEntryDetailsDialog.show", lambda self: None
+    )
+    store = EventStore(tmp_path / "test.db")
+    store.save(_event("10.0.0.1"))
+    panel = LogsPanel(store)
+    entry = panel._table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+
+    panel._open_details(entry)
+
+    assert len(panel._detail_dialogs) == 1
+    panel._detail_dialogs[0].close()

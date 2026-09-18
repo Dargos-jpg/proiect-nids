@@ -257,6 +257,78 @@ def test_strict_reporting_suppresses_single_model_flags(monkeypatch):
     assert analyzer.evaluate() == []
 
 
+def test_agreement_counts_tracks_every_verdict_even_when_no_event_emitted(monkeypatch):
+    """spre deosebire de evenimentele emise (filtrate de strict_reporting/
+    severitate), agreement_counts trebuie sa numere ORICE verdict - baza
+    pentru comparatia vechi-vs-modern (TrafficChartPanel)"""
+    from nids.core.ml_combination import Agreement
+
+    monkeypatch.setattr(
+        "nids.core.live_hybrid.predict_connections",
+        lambda expert, records: [0] * len(records),  # normal + local invata -> niciun Event
+    )
+
+    analyzer = LiveHybridAnalyzer(
+        expert=object(), local_manager=LocalModelManager(min_training_samples=100)
+    )
+    analyzer.add_packet(_packet("10.0.0.1", "10.0.0.2", 80))
+
+    events = analyzer.evaluate()
+
+    assert events == []
+    assert analyzer.agreement_counts[Agreement.LOCAL_LEARNING] == 1
+
+
+def test_agreement_counts_accumulates_across_multiple_ticks(monkeypatch):
+    from nids.core.ml_combination import Agreement
+
+    monkeypatch.setattr(
+        "nids.core.live_hybrid.predict_connections",
+        lambda expert, records: [1] * len(records),
+    )
+    monkeypatch.setattr("nids.core.live_hybrid.explain_connection", lambda expert, record: [])
+
+    analyzer = LiveHybridAnalyzer(
+        expert=object(), local_manager=LocalModelManager(min_training_samples=100)
+    )
+    analyzer.add_packet(_packet("10.0.0.1", "10.0.0.2", 80))
+    analyzer.evaluate()
+    analyzer.add_packet(_packet("10.0.0.1", "10.0.0.3", 22))
+    analyzer.evaluate()
+
+    assert analyzer.agreement_counts[Agreement.LOCAL_LEARNING] == 2
+
+
+def test_packet_buffer_is_capped_to_avoid_unbounded_reprocessing(monkeypatch):
+    """BUG REAL gasit de user: sesiune lunga (350k+ pachete, 2 ore) devenea
+    "incredibil de lag", disparut imediat la Oprire monitorizare - self._packets
+    crestea nelimitat si era reprocesat INTEGRAL la fiecare tick (cost
+    patratic in durata sesiunii). plafonat la o fereastra glisanta pe
+    ULTIMELE pachete - vezi BUGS.md"""
+    monkeypatch.setattr("nids.core.live_hybrid.MAX_BUFFERED_PACKETS", 3)
+
+    analyzer = LiveHybridAnalyzer(
+        expert=object(), local_manager=LocalModelManager(min_training_samples=100)
+    )
+    for i in range(10):
+        analyzer.add_packet(_packet("10.0.0.1", "10.0.0.2", 80, src_port=5000 + i))
+
+    assert len(analyzer._packets) == 3
+
+
+def test_reset_respects_the_packet_buffer_cap(monkeypatch):
+    monkeypatch.setattr("nids.core.live_hybrid.MAX_BUFFERED_PACKETS", 3)
+    analyzer = LiveHybridAnalyzer(
+        expert=object(), local_manager=LocalModelManager(min_training_samples=100)
+    )
+
+    analyzer.reset()
+    for i in range(10):
+        analyzer.add_packet(_packet("10.0.0.1", "10.0.0.2", 80, src_port=5000 + i))
+
+    assert len(analyzer._packets) == 3
+
+
 def test_reset_clears_state(monkeypatch):
     monkeypatch.setattr(
         "nids.core.live_hybrid.predict_connections",
@@ -270,5 +342,5 @@ def test_reset_clears_state(monkeypatch):
 
     analyzer.reset()
 
-    assert analyzer._packets == []
+    assert len(analyzer._packets) == 0
     assert analyzer._evaluated_connections == set()

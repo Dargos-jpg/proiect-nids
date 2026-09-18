@@ -41,6 +41,9 @@ def _make_panel(tmp_path, monkeypatch, settings: MlSettings) -> DashboardPanel:
     monkeypatch.setattr(
         "nids.ml.local.learning.DEFAULT_STATE_PATH", tmp_path / "local_state.joblib"
     )
+    monkeypatch.setattr(
+        "nids.ml.modern.learning.DEFAULT_STATE_PATH", tmp_path / "modern_local_state.joblib"
+    )
     monkeypatch.setattr("nids.ui.live_capture_thread.capture_live", _fake_capture_live)
     event_store = EventStore(tmp_path / "test.db")
     return DashboardPanel(

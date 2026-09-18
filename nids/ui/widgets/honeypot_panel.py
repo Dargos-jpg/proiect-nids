@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from nids.honeypot.listener import HoneypotHit, event_from_honeypot_hit
 from nids.honeypot.training_data import HoneypotTrainingStore
-from nids.ml.expert.retrain import MIN_HONEYPOT_SAMPLES, RetrainResult
+from nids.ml.modern.retrain import MIN_HONEYPOT_SAMPLES, RetrainResult
 from nids.storage.event_store import EventStore
 from nids.ui.honeypot_thread import HoneypotThread
 from nids.ui.retrain_thread import RetrainThread
@@ -66,7 +66,7 @@ class HoneypotPanel(QWidget):
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: #8a8a8a;")
 
-        self._retrain_button = QPushButton("Reantreneaza modelul expert cu date honeypot")
+        self._retrain_button = QPushButton("Reantreneaza modelul expert MODERN cu date honeypot")
         self._retrain_button.clicked.connect(self._on_retrain_clicked)
 
         self._retrain_status_label = QLabel()
@@ -76,8 +76,10 @@ class HoneypotPanel(QWidget):
         retrain_hint = QLabel(
             "fiecare conexiune la honeypot e etichetata automat drept atac "
             "(niciun fals-pozitiv posibil aici) si adaugata peste setul static "
-            "NSL-KDD la reantrenare - modelul anterior e pastrat ca backup (.bak), "
-            "reantrenarea nu e o operatie definitiva"
+            "CSE-CIC-IDS2018 la reantrenare - reantreneaza modelul expert MODERN "
+            "(cel folosit principal, vezi DATASET-COMPARISON.md), nu pe cel vechi "
+            "(NSL-KDD). modelul anterior e pastrat ca backup (.bak), reantrenarea "
+            "nu e o operatie definitiva"
         )
         retrain_hint.setWordWrap(True)
         retrain_hint.setStyleSheet("color: #8a8a8a;")
@@ -189,16 +191,17 @@ class HoneypotPanel(QWidget):
         count = self._training_store.sample_count()
         confirmed = QMessageBox.question(
             self,
-            "Reantreneaza modelul expert",
-            f"Reantrenezi modelul expert folosind cele {count} conexiuni honeypot "
-            "acumulate, peste setul static NSL-KDD? Modelul activ va fi inlocuit "
-            "(se pastreaza o copie de rezerva .bak). Poate dura cateva secunde.",
+            "Reantreneaza modelul expert modern",
+            f"Reantrenezi modelul expert MODERN (CSE-CIC-IDS2018, cel folosit "
+            f"principal) folosind cele {count} conexiuni honeypot acumulate? "
+            "Modelul activ va fi inlocuit (se pastreaza o copie de rezerva .bak). "
+            "Poate dura cateva secunde.",
         )
         if confirmed != QMessageBox.StandardButton.Yes:
             return
 
         self._retrain_button.setEnabled(False)
-        self._retrain_status_label.setText("se reantreneaza modelul expert...")
+        self._retrain_status_label.setText("se reantreneaza modelul expert modern...")
 
         self._retrain_thread = RetrainThread(self._training_store.packets())
         self._retrain_thread.succeeded.connect(self._on_retrain_succeeded)

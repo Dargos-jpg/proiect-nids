@@ -3,14 +3,17 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 
 from nids.capture.packet_meta import PacketMeta
-from nids.ml.expert.retrain import retrain_with_honeypot_data
+from nids.ml.modern.retrain import retrain_with_honeypot_data
 
 
 class RetrainThread(QThread):
     """antreneaza doua RandomForest-uri pe rand (baseline + varianta cu
     date honeypot) - poate dura cateva secunde, pe un thread separat ca
     UI-ul sa nu inghete, la fel ca LiveCaptureThread/SimulationThread/
-    HoneypotThread (subclasare directa, un singur apel blocant in run())"""
+    HoneypotThread (subclasare directa, un singur apel blocant in run()).
+
+    reantreneaza modelul MODERN (CSE-CIC-IDS2018) - devenit principal in
+    Faza 6 (DATASET-COMPARISON.md), nu mai pe cel vechi (NSL-KDD)"""
 
     succeeded = Signal(object)  # RetrainResult
     failed = Signal(str)

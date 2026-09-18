@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter, deque
+
 from nids.capture.packet_meta import PacketMeta
 from nids.core.event import Event
 from nids.core.inspect import ConnectionAssessment, assessment_to_json, format_explanation_snippet
-from nids.core.ml_combination import combine_predictions, event_for_agreement
+from nids.core.ml_combination import Agreement, combine_predictions, event_for_agreement
 from nids.ml.expert.model import ExpertModel
 from nids.ml.expert.predict import explain_connection, predict_connections
 from nids.ml.features.nsl_kdd_style import NslKddStyleFeatures, extract_nsl_kdd_style_features
@@ -14,6 +16,22 @@ _ConnectionKey = tuple[str, int | None, str, int | None, str]
 
 def _connection_key(record: NslKddStyleFeatures) -> _ConnectionKey:
     return (record.src_ip, record.src_port, record.dst_ip, record.dst_port, record.protocol_type)
+
+
+# BUG REAL gasit de user (sesiune de 2 ore, 350k+ pachete): monitorizarea
+# live devenea "incredibil de lag", disparea imediat la Oprire monitorizare
+# - confirma ca reevaluarea periodica era cauza, nu altceva. inainte de
+# acest plafon, self._packets crestea NELIMITAT, iar evaluate() reprocesa
+# TOATE pachetele sesiunii la fiecare tick (implicit 5s) - cost per tick
+# crescator cu durata sesiunii, deci cost TOTAL patratic in timp, nu
+# liniar. plafon = fereastra glisanta pe ULTIMELE pachete (nu pe timp) -
+# conteaza direct costul de procesare per tick, care depinde de NUMARUL de
+# pachete, nu de cat timp au trecut. nu afecteaza deduplicarea (_evaluated_connections
+# e un set separat, neplafonat - minuscul, doar tupluri) - o conexiune tot
+# e evaluata o singura data, la primul tick in care apare, atata timp cat
+# pachetele ei mai sunt in fereastra (in practica, mereu - tick-urile
+# ruleaza mult mai des decat timpul necesar ferestrei sa se umple)
+MAX_BUFFERED_PACKETS = 20_000
 
 
 class LiveHybridAnalyzer:
@@ -46,8 +64,14 @@ class LiveHybridAnalyzer:
         self._expert = expert
         self.local_manager = local_manager
         self._strict_reporting = strict_reporting
-        self._packets: list[PacketMeta] = []
+        self._packets: deque[PacketMeta] = deque(maxlen=MAX_BUFFERED_PACKETS)
         self._evaluated_connections: set[_ConnectionKey] = set()
+        # tine evidenta verdictelor pentru fiecare conexiune noua, INDIFERENT
+        # daca a generat sau nu un Event vizibil - folosit pentru comparatia
+        # vechi-vs-modern (vezi TrafficChartPanel, "Comparatie modele" -
+        # DATASET-COMPARISON.md). NU reseteaza la strict_reporting - conteaza
+        # decizia reala a modelelor, nu daca a fost raportata userului
+        self.agreement_counts: Counter[Agreement] = Counter()
 
     def add_packet(self, pkt: PacketMeta) -> None:
         self._packets.append(pkt)
@@ -56,7 +80,7 @@ class LiveHybridAnalyzer:
         if self._expert is None or not self._packets:
             return []
 
-        records = extract_nsl_kdd_style_features(self._packets)
+        records = extract_nsl_kdd_style_features(list(self._packets))
         new_records = [
             r for r in records if _connection_key(r) not in self._evaluated_connections
         ]
@@ -72,6 +96,7 @@ class LiveHybridAnalyzer:
             local_pred = self.local_manager.process(record)
             local_score = self.local_manager.anomaly_score(record)
             agreement = combine_predictions(expert_pred, local_pred)
+            self.agreement_counts[agreement] += 1
             event = event_for_agreement(
                 agreement,
                 record.src_ip,
@@ -119,5 +144,5 @@ class LiveHybridAnalyzer:
         return events
 
     def reset(self) -> None:
-        self._packets = []
+        self._packets = deque(maxlen=MAX_BUFFERED_PACKETS)
         self._evaluated_connections = set()

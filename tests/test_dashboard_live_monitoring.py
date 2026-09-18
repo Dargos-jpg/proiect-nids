@@ -31,6 +31,9 @@ def _make_panel(tmp_path, monkeypatch) -> DashboardPanel:
     monkeypatch.setattr(
         "nids.ml.local.learning.DEFAULT_STATE_PATH", tmp_path / "local_state.joblib"
     )
+    monkeypatch.setattr(
+        "nids.ml.modern.learning.DEFAULT_STATE_PATH", tmp_path / "modern_local_state.joblib"
+    )
     event_store = EventStore(tmp_path / "test.db")
     return DashboardPanel(
         _fake_block_manager(),
@@ -291,3 +294,50 @@ def test_dashboard_live_monitoring_restart_after_stop(tmp_path, monkeypatch):
 
     panel._stop_monitoring()
     _wait_until(app, lambda: panel._thread is None)
+
+
+def _make_idle_fake_capture():
+    """nu emite niciun pachet singur - testul injecteaza pachete direct
+    prin _on_live_packet(), doar are nevoie de threadul real pornit/oprit
+    curat (la fel ca LiveCaptureThread real, fara Npcap/retea reala)"""
+
+    def fake_capture_live(on_packet, on_arp=None, on_dns=None, on_payload=None, interface=None, stop_event=None):
+        while stop_event is not None and not stop_event.is_set():
+            time.sleep(0.02)
+
+    return fake_capture_live
+
+
+def test_all_packets_is_capped_during_live_monitoring(tmp_path, monkeypatch):
+    """BUG REAL notat de user (BUGS.md) - spre deosebire de bufferul
+    intern al analizoarelor (deja plafonat), _all_packets ramasese
+    neplafonat pe durata unei sesiuni live, crescand nelimitat"""
+    import nids.ui.widgets.dashboard_panel as dashboard_panel
+
+    app = _app()
+    monkeypatch.setattr("nids.ui.live_capture_thread.capture_live", _make_idle_fake_capture())
+    monkeypatch.setattr(dashboard_panel, "MAX_ALL_PACKETS", 3)
+    panel = _make_panel(tmp_path, monkeypatch)
+
+    panel._start_monitoring()
+    for i in range(10):
+        panel._on_live_packet(_fake_packet("10.0.0.2", 2000 + i))
+
+    assert len(panel._all_packets) == 3
+
+    panel._stop_monitoring()
+    _wait_until(app, lambda: panel._thread is None)
+
+
+def test_all_packets_stays_unbounded_for_loaded_pcap(tmp_path, monkeypatch):
+    """cap-ul se aplica DOAR pe calea live - un PCAP incarcat are nevoie
+    de lista COMPLETA (forensics/analiza pe orice conexiune din fisier),
+    nu de o fereastra glisanta"""
+    import nids.ui.widgets.dashboard_panel as dashboard_panel
+
+    monkeypatch.setattr(dashboard_panel, "MAX_ALL_PACKETS", 3)
+    panel = _make_panel(tmp_path, monkeypatch)
+
+    panel._all_packets = [_fake_packet("10.0.0.2", 2000 + i) for i in range(10)]
+
+    assert len(panel._all_packets) == 10

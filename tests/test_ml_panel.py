@@ -31,7 +31,9 @@ def _make_dashboard(tmp_path) -> DashboardPanel:
 def test_shows_expert_missing_when_not_loaded(tmp_path, monkeypatch):
     _app()
     dashboard = _make_dashboard(tmp_path)
-    monkeypatch.setattr(dashboard, "expert_model_loaded", lambda: False)
+    # Faza 6 (DATASET-COMPARISON.md): eticheta principala reflecta modelul
+    # MODERN, nu cel vechi (NSL-KDD, ramas doar "a doua opinie")
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: False)
     monkeypatch.setattr(dashboard, "local_model_status", lambda: None)
 
     panel = MlPanel(dashboard, MlSettings())
@@ -43,7 +45,7 @@ def test_shows_expert_missing_when_not_loaded(tmp_path, monkeypatch):
 def test_shows_expert_loaded(tmp_path, monkeypatch):
     _app()
     dashboard = _make_dashboard(tmp_path)
-    monkeypatch.setattr(dashboard, "expert_model_loaded", lambda: True)
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: True)
     monkeypatch.setattr(dashboard, "local_model_status", lambda: None)
 
     panel = MlPanel(dashboard, MlSettings())
@@ -54,7 +56,7 @@ def test_shows_expert_loaded(tmp_path, monkeypatch):
 def test_shows_local_learning_progress(tmp_path, monkeypatch):
     _app()
     dashboard = _make_dashboard(tmp_path)
-    monkeypatch.setattr(dashboard, "expert_model_loaded", lambda: True)
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: True)
     monkeypatch.setattr(
         dashboard,
         "local_model_status",
@@ -69,7 +71,7 @@ def test_shows_local_learning_progress(tmp_path, monkeypatch):
 def test_shows_local_active(tmp_path, monkeypatch):
     _app()
     dashboard = _make_dashboard(tmp_path)
-    monkeypatch.setattr(dashboard, "expert_model_loaded", lambda: True)
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: True)
     monkeypatch.setattr(
         dashboard,
         "local_model_status",
@@ -79,6 +81,58 @@ def test_shows_local_active(tmp_path, monkeypatch):
     panel = MlPanel(dashboard, MlSettings())
 
     assert "activ" in panel._local_label.text()
+
+
+def test_shows_modern_expert_metrics_when_available(tmp_path, monkeypatch):
+    _app()
+    dashboard = _make_dashboard(tmp_path)
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: True)
+    monkeypatch.setattr(dashboard, "local_model_status", lambda: None)
+    monkeypatch.setattr(
+        dashboard,
+        "modern_expert_metrics",
+        lambda: {
+            "accuracy": 0.9435,
+            "normal_precision": 0.91,
+            "normal_recall": 0.99,
+            "attack_precision": 0.99,
+            "attack_recall": 0.89,
+        },
+    )
+
+    panel = MlPanel(dashboard, MlSettings())
+
+    text = panel._metrics_label.text()
+    assert "94" in text
+    assert "91" in text and "99" in text
+
+
+def test_metrics_label_empty_when_not_available(tmp_path, monkeypatch):
+    _app()
+    dashboard = _make_dashboard(tmp_path)
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: False)
+    monkeypatch.setattr(dashboard, "local_model_status", lambda: None)
+    monkeypatch.setattr(dashboard, "modern_expert_metrics", lambda: None)
+
+    panel = MlPanel(dashboard, MlSettings())
+
+    assert panel._metrics_label.text() == ""
+
+
+def test_shows_old_model_as_second_opinion(tmp_path, monkeypatch):
+    """Faza 6: modelul vechi (NSL-KDD) ramane vizibil, dar explicit
+    etichetat ca "a doua opinie", separat de statusul principal"""
+    _app()
+    dashboard = _make_dashboard(tmp_path)
+    monkeypatch.setattr(dashboard, "modern_expert_model_loaded", lambda: True)
+    monkeypatch.setattr(dashboard, "local_model_status", lambda: None)
+    monkeypatch.setattr(dashboard, "expert_model_loaded", lambda: True)
+    monkeypatch.setattr(dashboard, "old_local_model_status", lambda: None)
+
+    panel = MlPanel(dashboard, MlSettings())
+
+    assert "a doua opinie" in panel._old_status_label.text().lower()
+    assert "NSL-KDD" in panel._old_status_label.text()
 
 
 # --- setari ---

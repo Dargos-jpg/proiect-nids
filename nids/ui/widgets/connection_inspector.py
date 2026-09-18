@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 from nids.core.inspect import ConnectionAssessment
 from nids.core.ml_combination import severity_from_local_score
 from nids.ml.features.nsl_kdd_style import to_feature_frame
+from nids.ml.modern.inspect import ModernAssessment
+from nids.ui.widgets.ip_lookup_dialog import IpIdentifyButton
 
 _SEVERITY_LABEL = {"scazuta": "usor", "medie": "moderat", "ridicata": "sever"}
 
@@ -48,11 +50,33 @@ class ConnectionInspectorDialog(QDialog):
     monitorizeze cat timp se uita), o instanta separata per conexiune
     analizata"""
 
-    def __init__(self, assessment: ConnectionAssessment, parent=None) -> None:
+    def __init__(
+        self,
+        assessment: ConnectionAssessment | None = None,
+        parent=None,
+        modern_assessment: ModernAssessment | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Analiza conexiune")
         self.resize(560, 620)
 
+        layout = QVBoxLayout(self)
+
+        if assessment is not None:
+            self._add_primary_section(layout, assessment)
+            if modern_assessment is not None:
+                self._add_modern_section(layout, modern_assessment)
+        elif modern_assessment is not None:
+            # eveniment generat de pipeline-ul modern (principal din Faza
+            # 6), redeschis dintr-o sesiune anterioara - traficul brut
+            # original nu mai exista, deci modelul vechi nu poate fi
+            # recalculat. modelul modern chiar are o "poza" salvata
+            # (assessment_json, vezi ModernLiveHybridAnalyzer.evaluate())
+            self._add_modern_only_section(layout, modern_assessment)
+        else:
+            layout.addWidget(QLabel("Nicio analiza disponibila pentru acest eveniment."))
+
+    def _add_primary_section(self, layout: QVBoxLayout, assessment: ConnectionAssessment) -> None:
         record = assessment.record
 
         header = QLabel(
@@ -72,6 +96,8 @@ class ConnectionInspectorDialog(QDialog):
             f"    |    Model local: {local_verdict}"
         )
         verdict.setStyleSheet("font-weight: bold;")
+
+        identify_button = IpIdentifyButton([record.src_ip, record.dst_ip], parent=self)
 
         explanation = QLabel(assessment.explanation)
         explanation.setWordWrap(True)
@@ -99,9 +125,9 @@ class ConnectionInspectorDialog(QDialog):
         all_values_rows = sorted(raw_values.items())
         all_values_table = _make_table(["feature", "valoare"], all_values_rows)
 
-        layout = QVBoxLayout(self)
         layout.addWidget(header)
         layout.addWidget(verdict)
+        layout.addWidget(identify_button)
         layout.addWidget(explanation)
         layout.addWidget(QLabel("De ce (model expert) - importanta globala a features:"))
         layout.addWidget(expert_table)
@@ -122,3 +148,90 @@ class ConnectionInspectorDialog(QDialog):
         layout.addWidget(categorical_table)
         layout.addWidget(QLabel("Toate cele 28 de valori folosite de modele:"))
         layout.addWidget(all_values_table)
+
+    def _add_modern_section(self, layout: QVBoxLayout, modern: ModernAssessment) -> None:
+        """"a doua opinie" - modelul expert modern (CSE-CIC-IDS2018),
+        antrenat pe date de retea din 2018, spre deosebire de modelul de
+        mai sus (NSL-KDD, date din 1998-99). ruleaza COMPLET INDEPENDENT -
+        nu participa la verdictul/acordul de mai sus, doar afisat alaturi,
+        ca studiu de diferentiere intre cele doua seturi de date - vezi
+        DATASET-COMPARISON.md"""
+        separator = QLabel(
+            "─── a doua opinie: modele MODERNE (CSE-CIC-IDS2018, 2018) ───"
+        )
+        separator.setStyleSheet("font-weight: bold; color: #8a8a8a;")
+
+        hint = QLabel(
+            "verdict INDEPENDENT, pe o schema de features diferita (72 vs 28) - "
+            "nu participa la acordul de mai sus, doar comparatie"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #8a8a8a;")
+
+        layout.addWidget(separator)
+        layout.addWidget(hint)
+        self._render_modern_body(layout, modern)
+
+    def _add_modern_only_section(self, layout: QVBoxLayout, modern: ModernAssessment) -> None:
+        """cand modelul vechi nu poate fi recalculat (pachetele brute ale
+        sesiunii originale nu mai exista), dar avem totusi o "poza" a
+        modelului modern salvata - afisata ca sectiune PRINCIPALA (nu ca
+        "a doua opinie", nu exista nimic altceva de aratat)"""
+        record = modern.record
+
+        header = QLabel(
+            f"{record.src_ip}:{record.src_port}  →  {record.dst_ip}:{record.dst_port}  "
+            f"({record.protocol})"
+        )
+        header.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header.setWordWrap(True)
+
+        note = QLabel(
+            "doar model expert MODERN disponibil pentru acest eveniment - traficul "
+            "brut original nu mai exista (alta sesiune sau aplicatia repornita), "
+            "deci modelul vechi (NSL-KDD) nu poate fi recalculat"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #8a8a8a;")
+
+        identify_button = IpIdentifyButton([record.src_ip, record.dst_ip], parent=self)
+
+        layout.addWidget(header)
+        layout.addWidget(note)
+        layout.addWidget(identify_button)
+        self._render_modern_body(layout, modern)
+
+    def _render_modern_body(self, layout: QVBoxLayout, modern: ModernAssessment) -> None:
+        modern_local_verdict = (
+            "inca invata"
+            if modern.local_is_learning
+            else _verdict_label(modern.local_prediction) + _score_label(modern.local_anomaly_score)
+        )
+        verdict = QLabel(
+            f"Model expert modern: {_verdict_label(modern.expert_prediction)}"
+            f"    |    Model local modern: {modern_local_verdict}"
+        )
+        verdict.setStyleSheet("font-weight: bold;")
+
+        modern_explanation = QLabel(modern.explanation)
+        modern_explanation.setWordWrap(True)
+
+        modern_rows = [
+            (c.feature, c.value, f"{c.importance:.1%}") for c in modern.expert_top_features
+        ]
+        modern_table = _make_table(["feature", "valoare", "importanta"], modern_rows)
+
+        modern_local_rows = [
+            (d.feature, f"{d.value:g}", f"{d.baseline_mean:.2f}", f"{d.z_score:+.2f}")
+            for d in modern.local_deviations
+        ]
+        modern_local_table = _make_table(
+            ["feature", "valoare", "medie normal", "deviatie (z-score)"], modern_local_rows
+        )
+
+        layout.addWidget(verdict)
+        layout.addWidget(modern_explanation)
+        layout.addWidget(QLabel("De ce (model expert modern) - importanta globala a features:"))
+        layout.addWidget(modern_table)
+        layout.addWidget(QLabel("Comparatie cu traficul normal (model local modern):"))
+        layout.addWidget(modern_local_table)

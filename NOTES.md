@@ -4,6 +4,9 @@ bug-uri reale gasite de user in timpul testarii + fix-uri aplicate: vezi
 BUGS.md (fisier separat, ca sa nu se piarda printre notele de
 arhitectura/features de mai jos).
 
+studiul de comparatie NSL-KDD (1998-99) vs CSE-CIC-IDS2018 (al doilea model
+expert, construit in paralel cu cel vechi): vezi DATASET-COMPARISON.md.
+
 ## decizii luate
 
 - Python + scikit-learn + Scapy + PySide6 (nu C#/.NET, decizie deliberata)
@@ -998,6 +1001,97 @@ depinda de cum iese antrenarea reala pe date jucarie minuscule). fixture-ul
 - codul acum chiar il incarca (`ExpertModel.load()`) ca sa il evalueze, nu
 doar ii verifica existenta fisierului.
 
+## al doilea model expert (CSE-CIC-IDS2018) - Faza 1+2 complete: date + model antrenat
+
+vezi DATASET-COMPARISON.md pentru toate detaliile (schema de 72 features,
+bug-uri de date gasite, rezultate exacte) - rezumat aici doar ca reper in
+jurnalul general.
+
+Faza 1 (date): descarcate cele 10 fisiere CSE-CIC-IDS2018 (6.5GB) direct
+prin HTTPS de pe S3 public, fara AWS CLI. gasite si reparate 2 probleme
+reale de date (schema diferita pe fisierul de marti, valori Infinity/NaN)
+plus 1 bug propriu (coloana Timestamp respingea 100% din randuri la
+verificarea de finitudine) - toate documentate in BUGS.md.
+
+Faza 2 (model): `nids/ml/features/cicflow_style.py` (extractor nou, 72
+features stil CICFlowMeter, complet separat de nsl_kdd_style.py) +
+`nids/ml/modern/` (dataset.py, model.py - ModernExpertModel, clasa proprie,
+nu reutilizeaza ExpertModel) + scripturi de pregatire/antrenare. bug real
+gasit dupa prima antrenare (plafon de esantionare egal pe toate clasele a
+inversat raportul normal/atac fata de realitate) - reparat, vezi BUGS.md.
+model final: 93.24% acuratete, echilibrat intre normal (91%/96%
+precizie/recall) si atac (95%/91%) - salvat separat, `expert_random_forest.joblib`
+(modelul vechi) neatins.
+
+Faza 3 (afisare side-by-side in UI) completa: ConnectionInspectorDialog
+arata acum, optional, o sectiune separata cu verdictul modelului modern -
+vizibil la orice "Analizeaza aceasta conexiune cu ML". bug real gasit si
+reparat pe drum: modelul salvat initial (fara regularizare) ajunsese la
+1.18 GB, incetinind toata suita de teste de la ~30s la peste 5 minute
+(vezi BUGS.md) - `min_samples_leaf=50` l-a redus la 68 MB, acuratete
+practic neschimbata (94.35% fata de 94.42%).
+
+user a decis apoi ca modelul modern sa devina PRINCIPAL (nu doar afisat ca
+comparatie) - Fazele 4-6 (model local modern, analizoare live/PCAP modern,
+DashboardPanel foloseste modelul modern ca principal peste tot: monitorizare
+live, PCAP, blocare automata) - toate complete, 578 teste in total. detalii
+complete (ce s-a inversat exact, ce cost s-a acceptat constient - ambele
+sisteme ruleaza in paralel la monitorizare live, doar modelul vechi nu mai
+genereaza evenimente vizibile - si ce ramane cosmetic neinversat, layout-ul
+ConnectionInspectorDialog) in DATASET-COMPARISON.md.
+
+apoi: reantrenarea din honeypot mutata pe modelul modern (nids/ml/modern/retrain.py)
++ graficul de trafic extins cu 5 vederi comutabile (pachete/secunda - existent,
+octeti/secunda, protocol, top IP-uri, comparatie vechi-vs-modern) + performanta
+reala a modelului modern afisata in panoul ML (salvata alaturi de model, nu
+hardcodata). 614 teste in total. bug de mediu real gasit si reparat pe drum:
+suita completa crapa intermitent cu segfault in joblib (threading) - fix in
+tests/conftest.py, limiteaza paralelismul doar in teste. detalii in
+DATASET-COMPARISON.md si BUGS.md.
+
+## BUG REAL gasit de user: monitorizare "incredibil de lag" dupa 2 ore/350k+ pachete + "vezi detalii" pentru orice rand din Loguri
+
+user a rulat monitorizarea live ~2 ore (350k+ pachete, 90 evenimente in
+Loguri - doar 2 confirmate de ambele modele, restul 88 port scan) si a
+observat aplicatia devenind foarte lenta, disparut imediat la Oprire
+monitorizare. cauza + fix complet in BUGS.md - pe scurt:
+`LiveHybridAnalyzer`/`ModernLiveHybridAnalyzer` reprocesau INTEGRAL toate
+pachetele sesiunii la fiecare tick (cost patratic in durata sesiunii,
+agravat de Faza 6 - ambele analizoare ruleaza acum la fiecare tick).
+plafonat `self._packets` la o fereastra glisanta (`deque(maxlen=20_000)`)
+in ambele module - validat empiric: 350k pachete + 70 tick-uri = 0.52s
+(fata de cresterea patratica anterioara).
+
+## DNS invers ("cine e acest IP") pentru Top IP-uri sursa
+
+user a intrebat si daca aplicatia monitorizeaza doar device-ul curent sau
+toata reteaua - clarificat: pe o retea cu switch (nu hub), Npcap vede doar
+traficul PROPRIU al masinii + broadcast/multicast de pe segment (ARP,
+DHCP, mDNS, SSDP, IGMP) - nu traficul unicast al altor dispozitive. pentru
+vizibilitate reala pe toata reteaua ar fi nevoie de port mirroring/SPAN pe
+switch/router administrabil - schimbare de infrastructura, nu de cod, NU
+inceputa.
+
+cerut si implementat: buton "Identifica IP-uri (DNS invers)" pe vederea
+"Top IP-uri sursa" a graficului - rezolvare PTR standard (`nslookup`/`dig -x`,
+informatie publica de retea, explicit NU doxxing). `nids/core/dns_lookup.py`
+(nou, `socket.gethostbyaddr` cu timeout temporar) + `ReverseDnsThread`
+(acelasi tipar ca toate celelalte thread-uri din proiect - rezolvarea DNS
+poate dura, nu trebuie sa inghete UI-ul) + `IpLookupResultsDialog`
+(non-modal, tabel IP -> hostname, "(fara inregistrare PTR)" cand nu exista).
+636 teste in total.
+
+## afisare detaliata la selectarea unui rand din Loguri
+
+majoritatea evenimentelor userului (port scan) nu au "Analizeaza cu ML"
+disponibil (nu au identitate de conexiune), iar descrierile lungi (liste
+de porturi) erau taiate in celula tabelului. adaugat `LogEntryDetailsDialog`
+(nou, `nids/ui/widgets/log_entry_details.py`) - functioneaza pentru ORICE
+rand din Loguri (nu doar cele analizabile ML), deschis fie prin dublu-click
+pe rand, fie din meniul contextual ("Vezi detalii complete") - arata
+descrierea completa (QTextEdit, fara trunchiere) + identitatea de conexiune
+daca exista (dest_ip/porturi/protocol), omisa elegant daca nu (semnaturi).
+
 ## note tehnice minore
 
 - `python -m nids.ui.main` porneste un proces PARINTE care, la randul
@@ -1039,6 +1133,71 @@ doar ii verifica existenta fisierului.
   bufferul curent (chiar fara predictie formala) - e intentionat, nu bug
 - exportul de raport (Loguri) respecta filtrul de sursa curent - daca ai
   o sursa selectata in dropdown, exportul contine DOAR cronologia aceleia
+
+## lookup AS/organizatie (Team Cymru), extensie la DNS invers
+
+user a intrebat "am putea afla alte detalii de la rezolvarea inversa DNS?"
+- PTR (nume de host) lipseste des (majoritatea IP-urilor rezidentiale/cloud
+nu au PTR configurat de proprietar), deci "Identifica IP-uri" ramanea gol
+pentru multe adrese. adaugat AS (Autonomous System)/organizatie/tara/
+prefix BGP via Team Cymru IP-to-ASN, disponibil ca inregistrari DNS TXT
+publice (`<ip invers>.origin.asn.cymru.com` -> AS+prefix+tara+RIR, apoi
+`AS<n>.asn.cymru.com` -> numele organizatiei) - acopera si IP-urile fara
+PTR, pentru ca vine direct din datele BGP anuntate pe internet, nu dintr-o
+configurare optionala.
+
+user a mai cerut: "sa se afiseze practic la analiza sau la detalii tot ce
+se poate?" - adica acelasi lookup, disponibil si direct din analiza unei
+conexiuni/eveniment flagged, nu doar din vederea "Top IP-uri sursa". extras
+`IpLookupResultsDialog` (mutat, nu duplicat) + logica de buton/thread intr-un
+buton reutilizabil `IpIdentifyButton` (nou, `nids/ui/widgets/ip_lookup_dialog.py`) -
+accepta fie o lista fixa de IP-uri (cunoscute la construirea dialogului),
+fie o functie fara argumente (pentru cazul "Top IP-uri sursa", unde lista
+se schimba in timp - evaluata abia la click). adaugat cate un buton
+"Identifica IP-uri" in `ConnectionInspectorDialog` (sursa+destinatie
+conexiunii analizate) si `LogEntryDetailsDialog` (sursa, +destinatie daca
+exista - semnaturile ca port scan/brute-force nu au mereu destinatie).
+`TrafficChartPanel` LASAT NEATINS (deja functional, testat) - a ramas cu
+implementarea proprie, doar importa `IpLookupResultsDialog` din noua
+locatie in loc sa o mai defineasca inline.
+
+implementare: interogarile TXT sunt facute manual peste un socket UDP
+normal (nu are nevoie de drepturi de Administrator, spre deosebire de
+captura de pachete) catre un resolver public fix (8.8.8.8), folosind scapy
+(deja dependinta a proiectului) doar pentru encodarea/decodarea mesajului
+DNS - validat manual cu o interogare reala inainte de a scrie codul final
+(format exact: `"15169 | 8.8.8.0/24 | US | arin | 2023-12-28"` pentru
+origin, `"15169 | US | arin | 2000-03-30 | GOOGLE - Google LLC, US"`
+pentru numele organizatiei).
+
+`nids/core/dns_lookup.py`: `AsnInfo` (dataclass), `asn_lookup()`/
+`asn_lookup_many()`, `IpLookupResult` (hostname + asn_info) si
+`lookup_ip_details()`/`lookup_ip_details_many()` care combina PTR-ul
+existent cu noul lookup. IPv6 neimplementat inca (schema de interogare Cymru
+foloseste nibble-uri hex, nu octeti) - `asn_lookup()` intoarce direct None.
+`ReverseDnsThread` foloseste acum `lookup_ip_details_many()` in loc de
+`reverse_dns_lookup_many()`. `IpLookupResultsDialog` are 3 coloane noi (AS,
+organizatie/ISP, tara, prefix BGP - "-" cand lipseste), butonul redenumit
+"Identifica IP-uri" (nu mai e doar DNS invers). 656 teste in total.
+
+## persistarea assessment_json si pentru modelul modern (ultimul gol din DATASET-COMPARISON.md)
+
+vezi DATASET-COMPARISON.md, "Faza 7" pentru detalii complete. pe scurt:
+modelul modern (principal din Faza 6) nu mai are nevoie de pachetele brute
+ale sesiunii curente ca sa poata fi reanalizat mai tarziu din Loguri -
+`ModernLiveHybridAnalyzer` salveaza acum o "poza" completa (assessment_json)
+la fel ca sistemul vechi. `ConnectionInspectorDialog` afiseaza analiza
+modernă ca sectiune PRINCIPALA (nu "a doua opinie") cand modelul vechi nu
+poate fi recalculat. 666 teste in total.
+
+## plafonarea DashboardPanel._all_packets (ultima limitare cunoscuta, inchisa)
+
+vezi BUGS.md pentru detalii complete. `_all_packets` (folosit pentru
+"Analizeaza aceasta conexiune"/"Reconstruieste conexiunea" din Trafic)
+devine acum `deque(maxlen=MAX_ALL_PACKETS=50_000)` DOAR pe calea live
+(`_start_monitoring()`) - PCAP-urile incarcate raman neplafonate, au nevoie
+de fisierul complet. posibil abia de la Faza 7 (evenimentele deja
+raportate nu mai depind de aceasta lista). 668 teste in total.
 
 ## probleme de anticipat (vezi si CONTEXT-nids.md)
 

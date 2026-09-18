@@ -97,12 +97,15 @@ def test_dashboard_falls_back_when_expert_model_missing(tmp_path, monkeypatch):
     assert panel._expert_model is None
 
 
-def test_dashboard_uses_hybrid_analysis_when_expert_model_available(tmp_path, monkeypatch):
-    _app()
-    panel = _make_panel(tmp_path)
-    assert panel._expert_model is not None
-
+def _monkeypatch_pcap_analysis_calls(monkeypatch) -> list:
+    """inregistreaza ce functie de analiza PCAP a fost apelata efectiv -
+    Faza 6 (DATASET-COMPARISON.md): modern e principal, vechiul hibrid e
+    fallback, semnaturile-only raman ultimul refugiu"""
     calls = []
+    monkeypatch.setattr(
+        "nids.ui.widgets.dashboard_panel.analyze_pcap_modern_hybrid",
+        lambda path, expert, **kwargs: calls.append(("modern_hybrid", path)) or [],
+    )
     monkeypatch.setattr(
         "nids.ui.widgets.dashboard_panel.analyze_pcap_hybrid",
         lambda path, expert, **kwargs: calls.append(("hybrid", path)) or [],
@@ -115,31 +118,39 @@ def test_dashboard_uses_hybrid_analysis_when_expert_model_available(tmp_path, mo
         "nids.ui.widgets.dashboard_panel.QFileDialog.getOpenFileName",
         lambda *a, **k: (str(PCAP_PATH), ""),
     )
+    return calls
 
+
+def test_dashboard_uses_modern_hybrid_analysis_when_modern_model_available(tmp_path, monkeypatch):
+    _app()
+    panel = _make_panel(tmp_path)
+    assert panel._modern_expert_model is not None
+
+    calls = _monkeypatch_pcap_analysis_calls(monkeypatch)
+    panel._on_load_clicked()
+
+    assert calls == [("modern_hybrid", str(PCAP_PATH))]
+
+
+def test_dashboard_falls_back_to_old_hybrid_when_only_old_model_available(tmp_path, monkeypatch):
+    _app()
+    panel = _make_panel(tmp_path)
+    panel._modern_expert_model = None
+    assert panel._expert_model is not None
+
+    calls = _monkeypatch_pcap_analysis_calls(monkeypatch)
     panel._on_load_clicked()
 
     assert calls == [("hybrid", str(PCAP_PATH))]
 
 
-def test_dashboard_falls_back_to_signatures_only_without_expert_model(tmp_path, monkeypatch):
+def test_dashboard_falls_back_to_signatures_only_without_any_expert_model(tmp_path, monkeypatch):
     _app()
     panel = _make_panel(tmp_path)
+    panel._modern_expert_model = None
     panel._expert_model = None
 
-    calls = []
-    monkeypatch.setattr(
-        "nids.ui.widgets.dashboard_panel.analyze_pcap_hybrid",
-        lambda path, expert, **kwargs: calls.append(("hybrid", path)) or [],
-    )
-    monkeypatch.setattr(
-        "nids.ui.widgets.dashboard_panel.analyze_pcap",
-        lambda path, **kwargs: calls.append(("signatures_only", path)) or [],
-    )
-    monkeypatch.setattr(
-        "nids.ui.widgets.dashboard_panel.QFileDialog.getOpenFileName",
-        lambda *a, **k: (str(PCAP_PATH), ""),
-    )
-
+    calls = _monkeypatch_pcap_analysis_calls(monkeypatch)
     panel._on_load_clicked()
 
     assert calls == [("signatures_only", str(PCAP_PATH))]

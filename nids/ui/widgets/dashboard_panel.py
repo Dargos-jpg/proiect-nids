@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections import deque
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer
@@ -27,12 +29,18 @@ from nids.core.event import Event, Severity
 from nids.core.hybrid_analysis import analyze_pcap_hybrid
 from nids.core.inspect import ConnectionAssessment, assess_connection, assessment_from_json
 from nids.core.live_hybrid import LiveHybridAnalyzer
-from nids.core.ml_combination import BOTH_ATTACK_EVENT_TYPE
+from nids.core.ml_combination import BOTH_ATTACK_EVENT_TYPE, Agreement
 from nids.core.ml_settings import MlSettings
 from nids.core.response_settings import ResponseSettings
 from nids.ml.expert.model import ExpertModel
+from nids.ml.features.cicflow_style import CicFlowFeatures, extract_cicflow_features
 from nids.ml.features.nsl_kdd_style import NslKddStyleFeatures, extract_nsl_kdd_style_features
 from nids.ml.local.learning import LocalModelManager
+from nids.ml.modern.hybrid_analysis import analyze_pcap_modern_hybrid
+from nids.ml.modern.inspect import ModernAssessment, assess_modern, modern_assessment_from_json
+from nids.ml.modern.learning import ModernLocalModelManager
+from nids.ml.modern.live_hybrid import ModernLiveHybridAnalyzer
+from nids.ml.modern.model import ModernExpertModel
 from nids.response.manager import BlockManager, BlockRuleError
 from nids.signatures.arp_spoofing import ArpSpoofTracker
 from nids.signatures.brute_force import BruteForceTracker
@@ -54,6 +62,32 @@ _SEVERITY_COLOR = {
     Severity.MEDIUM: QColor("#dcdcaa"),
     Severity.HIGH: QColor("#f14c4c"),
 }
+
+# etichete scurte pentru graficul de comparatie vechi-vs-modern
+# (TrafficChartPanel) - valorile Agreement sunt fraze intregi, prea lungi
+# pentru axa unui bar chart
+_AGREEMENT_SHORT_LABELS = {
+    Agreement.BOTH_ATTACK: "ambele: atac",
+    Agreement.BOTH_NORMAL: "ambele: normal",
+    Agreement.EXPERT_ONLY: "doar expert",
+    Agreement.LOCAL_ONLY: "doar local",
+    Agreement.LOCAL_LEARNING: "local invata",
+}
+
+# BUG REAL notat de user (BUGS.md, fix-ul de lag din monitorizarea live):
+# spre deosebire de bufferul intern al analizoarelor (deja plafonat la
+# 20_000, vezi LiveHybridAnalyzer/ModernLiveHybridAnalyzer), lista asta
+# ramasese neplafonata - creste nelimitat pe durata unei sesiuni live,
+# facand un singur click pe "Analizeaza aceasta conexiune"/"Reconstruieste
+# conexiunea" din ce in ce mai lent (reproceseaza TOATA lista) si consumand
+# memorie tot mai multa. plafon mai mare decat bufferul analizoarelor
+# (foloseste si pentru forensics/analiza directa din Trafic pe conexiuni
+# INCA neevaluate, nu doar pentru evaluare periodica) - de la Faza 7
+# (persistarea assessment_json), evenimentele deja raportate NU mai
+# depind deloc de aceasta lista, deci un plafon mai mic nu le afecteaza.
+# NU se aplica la PCAP-uri incarcate (_on_load_clicked) - acelea au nevoie
+# de lista COMPLETA, fixa, nu de o fereastra glisanta
+MAX_ALL_PACKETS = 50_000
 
 
 @dataclass
@@ -91,6 +125,15 @@ class DashboardPanel(QWidget):
         )
 
         self._status_label = QLabel("niciun fisier incarcat")
+        # BUG REAL gasit de user: fara word wrap, un mesaj de status lung
+        # (ex: "nu s-a putut identifica conexiunea...") forteaza latimea
+        # minima a QLabel-ului, deci si fereastra principala se redimensioneaza
+        # vizibil, fara sa apara vreun dialog - parea o eroare silentioasa
+        self._status_label.setWordWrap(True)
+        # doar word wrap nu ajunge - QLabel.sizeHint() ramane bazat pe
+        # latimea textului nefragmentat, deci fara o latime maxima explicita
+        # layout-ul tot ar creste fereastra ca sa incapa mesajul pe un rand
+        self._status_label.setMaximumWidth(400)
 
         self._load_button = QPushButton("Incarca PCAP...")
         self._load_button.clicked.connect(self._on_load_clicked)
@@ -134,12 +177,21 @@ class DashboardPanel(QWidget):
         self._dns_tunnel_tracker: DnsTunnelTracker | None = None
         self._payload_tracker: PayloadSignatureTracker | None = None
         self._live_hybrid: LiveHybridAnalyzer | None = None
+        self._modern_live_hybrid: ModernLiveHybridAnalyzer | None = None
         self._packet_count = 0
         self._event_items: dict[tuple[str, str], QListWidgetItem] = {}
+        # list[] initial (gol, oricum) - devine deque(maxlen=MAX_ALL_PACKETS)
+        # la Start monitorizare (live, plafonat) sau list complet la
+        # incarcare PCAP (_on_load_clicked, neplafonat - vezi MAX_ALL_PACKETS)
         self._all_packets: list[PacketMeta] = []
         self._inspector_dialogs: list[ConnectionInspectorDialog] = []
         self._timeline_dialogs: list[ConnectionTimelineDialog] = []
         self._expert_model = self._try_load_expert_model()
+        # model expert MODERN (CSE-CIC-IDS2018) - complet independent de cel
+        # de mai sus, "a doua opinie" doar la inspectie manuala (vezi
+        # _analyze_connection). None e un caz normal - inca nu toata lumea
+        # a rulat scripts/prepare_cse_cic_ids2018.py + train_modern_expert_model.py
+        self._modern_expert_model = self._try_load_modern_expert_model()
 
         self._ml_timer = QTimer(self)
         self._ml_timer.timeout.connect(self._on_ml_evaluation_tick)
@@ -151,12 +203,48 @@ class DashboardPanel(QWidget):
         except FileNotFoundError:
             return None
 
+    @staticmethod
+    def _try_load_modern_expert_model() -> ModernExpertModel | None:
+        try:
+            return ModernExpertModel.load()
+        except FileNotFoundError:
+            return None
+
+    def modern_expert_model_loaded(self) -> bool:
+        return self._modern_expert_model is not None
+
+    def modern_expert_metrics(self) -> dict[str, float] | None:
+        """performanta pe test set a modelului MODERN, calculata la
+        (re)antrenare si salvata alaturi de model - vezi
+        nids.ml.modern.model.build_metrics(). None daca modelul nu e
+        incarcat sau a fost salvat inainte de introducerea acestui camp"""
+        if self._modern_expert_model is None:
+            return None
+        return self._modern_expert_model.metrics
+
     # --- status pentru panoul ML ---
 
     def expert_model_loaded(self) -> bool:
         return self._expert_model is not None
 
     def local_model_status(self) -> LocalModelStatus | None:
+        """status al modelului local PRINCIPAL (modern, CSE-CIC-IDS2018) -
+        vezi DATASET-COMPARISON.md, Faza 6: modelul modern e folosit acum
+        constant ca principal, cel vechi (NSL-KDD) ramane doar "a doua
+        opinie" (old_local_model_status())"""
+        if self._modern_live_hybrid is None:
+            return None
+        manager = self._modern_live_hybrid.local_manager
+        return LocalModelStatus(
+            is_learning=manager.is_learning,
+            samples_collected=manager.samples_collected,
+            min_training_samples=manager.min_training_samples,
+        )
+
+    def old_local_model_status(self) -> LocalModelStatus | None:
+        """status al modelului local VECHI (NSL-KDD) - ramas doar ca "a
+        doua opinie", ruleaza in fundal (antrenat continuu, la fel ca
+        inainte) dar nu mai genereaza evenimente principale"""
         if self._live_hybrid is None:
             return None
         manager = self._live_hybrid.local_manager
@@ -189,7 +277,26 @@ class DashboardPanel(QWidget):
         dns_min_label_length = self._signatures_panel.dns_min_label_length()
         dns_min_entropy = self._signatures_panel.dns_min_entropy()
         payload_signatures_enabled = self._signatures_panel.payload_signatures_enabled()
-        if self._expert_model is not None:
+        # Faza 6 (vezi DATASET-COMPARISON.md): modelul MODERN e principal -
+        # analyze_pcap_modern_hybrid() incearca primul. daca userul nu l-a
+        # antrenat inca (scripts/prepare_cse_cic_ids2018.py + train_modern_expert_model.py),
+        # cade pe modelul vechi (NSL-KDD) - mai bine decat sa sara direct
+        # la "doar semnaturi" cand exista totusi UN model ML disponibil
+        if self._modern_expert_model is not None:
+            events = analyze_pcap_modern_hybrid(
+                path,
+                self._modern_expert_model,
+                port_scan_threshold=threshold,
+                port_scan_window=window,
+                sensitive_ports=sensitive_ports,
+                brute_force_threshold=brute_force_threshold,
+                brute_force_window=brute_force_window,
+                brute_force_ports=brute_force_ports,
+                dns_min_label_length=dns_min_label_length,
+                dns_min_entropy=dns_min_entropy,
+                payload_signatures_enabled=payload_signatures_enabled,
+            )
+        elif self._expert_model is not None:
             events = analyze_pcap_hybrid(
                 path,
                 self._expert_model,
@@ -242,7 +349,7 @@ class DashboardPanel(QWidget):
         self._traffic_chart.clear()
         if self._forensics_panel is not None:
             self._forensics_panel.clear()
-        self._all_packets = []
+        self._all_packets = deque(maxlen=MAX_ALL_PACKETS)
         self._stream_analyzer = StreamAnalyzer(
             port_scan_threshold=self._signatures_panel.threshold(),
             window_seconds=self._signatures_panel.window_seconds(),
@@ -261,6 +368,11 @@ class DashboardPanel(QWidget):
         self._payload_tracker = (
             PayloadSignatureTracker() if self._signatures_panel.payload_signatures_enabled() else None
         )
+        # modelul vechi (NSL-KDD) ramane pornit in fundal - continua sa se
+        # antreneze pe traficul live (altfel modelul lui local ar ramane
+        # inghetat/"inca invata" mereu), dar evenimentele lui NU mai devin
+        # principale (vezi _on_ml_evaluation_tick) - doar "a doua opinie",
+        # disponibila la cerere din Loguri/Trafic (Faza 6, DATASET-COMPARISON.md)
         local_manager = LocalModelManager.load_or_new(
             min_training_samples=self._ml_settings.min_training_samples,
             retrain_every=self._ml_settings.retrain_every,
@@ -270,6 +382,21 @@ class DashboardPanel(QWidget):
         )
         self._live_hybrid = LiveHybridAnalyzer(
             self._expert_model, local_manager, strict_reporting=self._ml_settings.strict_reporting
+        )
+
+        # modelul MODERN (CSE-CIC-IDS2018) - principal, genereaza
+        # evenimentele afisate/salvate/eligibile pentru blocare automata
+        modern_local_manager = ModernLocalModelManager.load_or_new(
+            min_training_samples=self._ml_settings.min_training_samples,
+            retrain_every=self._ml_settings.retrain_every,
+            max_buffer_size=self._ml_settings.max_buffer_size,
+            contamination=self._ml_settings.contamination,
+            n_estimators=self._ml_settings.n_estimators,
+        )
+        self._modern_live_hybrid = ModernLiveHybridAnalyzer(
+            self._modern_expert_model,
+            modern_local_manager,
+            strict_reporting=self._ml_settings.strict_reporting,
         )
         self._packet_count = 0
 
@@ -312,6 +439,11 @@ class DashboardPanel(QWidget):
 
         if self._live_hybrid is not None and not self._live_hybrid.local_manager.is_learning:
             self._live_hybrid.local_manager.save()
+        if (
+            self._modern_live_hybrid is not None
+            and not self._modern_live_hybrid.local_manager.is_learning
+        ):
+            self._modern_live_hybrid.local_manager.save()
 
     def _stop_monitoring(self) -> None:
         self._monitor_button.setEnabled(False)
@@ -324,11 +456,13 @@ class DashboardPanel(QWidget):
             f"monitorizare live pornita - {self._packet_count} pachete"
         )
         self._traffic_panel.add_packet(pkt)
-        self._traffic_chart.record_packet()
+        self._traffic_chart.record_packet(pkt)
         self._all_packets.append(pkt)
 
         if self._live_hybrid is not None:
             self._live_hybrid.add_packet(pkt)
+        if self._modern_live_hybrid is not None:
+            self._modern_live_hybrid.add_packet(pkt)
 
         if self._stream_analyzer is not None:
             update = self._stream_analyzer.process_packet(pkt)
@@ -405,13 +539,43 @@ class DashboardPanel(QWidget):
         self._simulation_thread = None
 
     def _on_ml_evaluation_tick(self) -> None:
-        if self._live_hybrid is None:
+        # modelul vechi (NSL-KDD) tot ruleaza evaluate() - altfel modelul
+        # lui local nu s-ar mai antrena niciodata din trafic live (process()
+        # e apelat DIN evaluate(), nu din add_packet()) si ar ramane "inca
+        # invata" la infinit, inutil ca "a doua opinie". rezultatul lui insa
+        # NU mai devine eveniment principal (nu se afiseaza, nu se salveaza,
+        # nu conteaza pentru blocarea automata) - vezi DATASET-COMPARISON.md,
+        # Faza 6
+        if self._live_hybrid is not None:
+            self._live_hybrid.evaluate()
+
+        if self._modern_live_hybrid is None:
             return
-        events = self._live_hybrid.evaluate()
+        events = self._modern_live_hybrid.evaluate()
         for event in events:
             self._traffic_chart.record_event(event.severity)
             self._maybe_auto_block(event)
         self._append_events(events)
+
+        old_counts, modern_counts = self._model_comparison_counts()
+        self._traffic_chart.update_model_comparison(old_counts, modern_counts)
+
+    def _model_comparison_counts(self) -> tuple[dict[str, int], dict[str, int]]:
+        """totaluri cumulative pe sesiune, per tip de acord - pentru
+        graficul "Comparatie modele" (TrafficChartPanel). foloseste
+        agreement_counts direct de pe analizoare (INDIFERENT daca strict
+        de raportare a suprimat evenimentul vizibil) - vrem sa vedem cum
+        se comporta de fapt cele doua modele, nu doar ce a ajuns in Loguri"""
+
+        def _labeled(analyzer) -> dict[str, int]:
+            if analyzer is None:
+                return {}
+            return {
+                _AGREEMENT_SHORT_LABELS[agreement]: count
+                for agreement, count in analyzer.agreement_counts.items()
+            }
+
+        return _labeled(self._live_hybrid), _labeled(self._modern_live_hybrid)
 
     def _maybe_auto_block(self, event: Event) -> None:
         """raspuns automat, opt-in (vezi CONTEXT-nids.md, "nivel de
@@ -469,6 +633,11 @@ class DashboardPanel(QWidget):
         self._ml_timer.stop()
         if self._live_hybrid is not None and not self._live_hybrid.local_manager.is_learning:
             self._live_hybrid.local_manager.save()
+        if (
+            self._modern_live_hybrid is not None
+            and not self._modern_live_hybrid.local_manager.is_learning
+        ):
+            self._modern_live_hybrid.local_manager.save()
         self._live_hybrid = None
         self._monitor_button.setText("Porneste monitorizare")
         self._monitor_button.setEnabled(True)
@@ -523,7 +692,7 @@ class DashboardPanel(QWidget):
         agregate), aici arati userului fluxul BRUT, pachet cu pachet, al
         conexiunii complete - nu are nevoie de niciun model, doar de
         _all_packets, deja pastrat pentru sesiunea curenta"""
-        matches = packets_for_connection(self._all_packets, pkt)
+        matches = packets_for_connection(list(self._all_packets), pkt)
         if not matches:
             self._status_label.setText("nu s-au gasit alte pachete pentru aceasta conexiune")
             return
@@ -536,13 +705,15 @@ class DashboardPanel(QWidget):
     def _on_log_analyze_requested(self, entry: StoredEvent) -> None:
         """analog cu analiza din Trafic, dar pornind de la un rand din
         Loguri. daca evenimentul are o "poza" salvata a analizei
-        (assessment_json - vezi LiveHybridAnalyzer), o folosim direct,
-        indiferent de sesiune - nu are nevoie de pachetele brute, care
-        oricum nu mai exista dupa un restart. altfel (evenimente vechi,
-        salvate inainte de aceasta functionalitate) incercam sa
-        recalculam din traficul sesiunii curente, daca mai e disponibil"""
+        (assessment_json - vezi LiveHybridAnalyzer/ModernLiveHybridAnalyzer),
+        o folosim direct, indiferent de sesiune - nu are nevoie de
+        pachetele brute, care oricum nu mai exista dupa un restart. altfel
+        (evenimente foarte vechi, salvate inainte de aceasta functionalitate)
+        incercam sa recalculam din traficul sesiunii curente, daca mai e
+        disponibil"""
         if entry.assessment_json is not None:
-            self._show_inspector(assessment_from_json(entry.assessment_json))
+            old_assessment, modern_assessment = _load_assessment_json(entry.assessment_json)
+            self._show_inspector(old_assessment, modern_assessment)
             return
 
         # BUG REAL gasit de user: brute-force/porturi sensibile salveaza
@@ -578,7 +749,7 @@ class DashboardPanel(QWidget):
             self._status_label.setText("nu exista trafic colectat de analizat")
             return
 
-        records = extract_nsl_kdd_style_features(self._all_packets)
+        records = extract_nsl_kdd_style_features(list(self._all_packets))
         record = _find_matching_connection(records, src_ip, src_port, dst_ip, dst_port, protocol)
         if record is None:
             self._status_label.setText(
@@ -589,10 +760,40 @@ class DashboardPanel(QWidget):
 
         local_manager = self._live_hybrid.local_manager if self._live_hybrid is not None else None
         assessment = assess_connection(record, self._expert_model, local_manager)
-        self._show_inspector(assessment)
+        modern_assessment = self._assess_modern_connection(src_ip, src_port, dst_ip, dst_port, protocol)
+        self._show_inspector(assessment, modern_assessment)
 
-    def _show_inspector(self, assessment: ConnectionAssessment) -> None:
-        dialog = ConnectionInspectorDialog(assessment, parent=self)
+    def _assess_modern_connection(
+        self,
+        src_ip: str,
+        src_port: int | None,
+        dst_ip: str,
+        dst_port: int | None,
+        protocol: str | None,
+    ):
+        """"a doua opinie" (CSE-CIC-IDS2018) - complet optionala si
+        best-effort: None daca modelul modern nu a fost antrenat inca
+        (scripts/prepare_cse_cic_ids2018.py + train_modern_expert_model.py,
+        vezi DATASET-COMPARISON.md) sau daca nu se gaseste un flux
+        corespunzator. NU intrerupe niciodata analiza principala (NSL-KDD)"""
+        if self._modern_expert_model is None:
+            return None
+        flows = extract_cicflow_features(list(self._all_packets))
+        flow = _find_matching_flow(flows, src_ip, src_port, dst_ip, dst_port, protocol)
+        if flow is None:
+            return None
+        # local_manager=None: inca nu exista o sesiune persistenta de
+        # monitorizare pe modelele moderne (Faza 6, urmeaza) - la fel ca la
+        # modelul vechi, care arata "model local indisponibil" pentru
+        # analiza pe un PCAP incarcat, fara monitorizare live in paralel
+        return assess_modern(flow, self._modern_expert_model, local_manager=None)
+
+    def _show_inspector(
+        self,
+        assessment: ConnectionAssessment | None,
+        modern_assessment: ModernAssessment | None = None,
+    ) -> None:
+        dialog = ConnectionInspectorDialog(assessment, parent=self, modern_assessment=modern_assessment)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._inspector_dialogs.append(dialog)
         dialog.finished.connect(lambda: self._inspector_dialogs.remove(dialog))
@@ -643,6 +844,22 @@ class DashboardPanel(QWidget):
         )
 
 
+def _load_assessment_json(
+    raw: str,
+) -> tuple[ConnectionAssessment | None, ModernAssessment | None]:
+    """o "poza" salvata poate fi din modelul vechi (asa functiona initial,
+    inainte de Faza 6 - vezi DATASET-COMPARISON.md) sau din cel modern
+    (implicit acum, singurul care mai salveaza assessment_json pentru
+    evenimente live - ModernLiveHybridAnalyzer.evaluate()). cheia "model"
+    lipseste din blob-urile deja salvate pe disc, de dinainte de aceasta
+    distinctie - absenta ei inseamna implicit "old", ca sa nu se rupa
+    compatibilitatea cu ce e deja in baza de date a userului"""
+    payload = json.loads(raw)
+    if payload.get("model") == "modern":
+        return None, modern_assessment_from_json(raw)
+    return assessment_from_json(raw), None
+
+
 def _find_matching_connection(
     records: list[NslKddStyleFeatures],
     src_ip: str,
@@ -666,6 +883,28 @@ def _find_matching_connection(
         if protocol is not None and record.protocol_type != protocol:
             continue
         return record
+    return None
+
+
+def _find_matching_flow(
+    flows: list[CicFlowFeatures],
+    src_ip: str,
+    src_port: int | None,
+    dst_ip: str,
+    dst_port: int | None,
+    protocol: str | None,
+) -> CicFlowFeatures | None:
+    """echivalentul lui _find_matching_connection, pentru schema modelului
+    expert modern (CicFlowFeatures.protocol, nu .protocol_type)"""
+    for flow in flows:
+        forward = (flow.src_ip, flow.src_port, flow.dst_ip, flow.dst_port)
+        backward = (flow.dst_ip, flow.dst_port, flow.src_ip, flow.src_port)
+        pair = (src_ip, src_port, dst_ip, dst_port)
+        if pair not in (forward, backward):
+            continue
+        if protocol is not None and flow.protocol != protocol:
+            continue
+        return flow
     return None
 
 

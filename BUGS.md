@@ -271,6 +271,106 @@ conexiuni) SI corect (nicio cursa posibila). exact genul de bug pe care
 scrierea testelor cu un server real (nu un mock) l-a scos la iveala inainte
 sa ajunga cod livrat - testul a fost cel care a gasit problema, nu userul.
 
+## bug real la prima rulare: scriptul de pregatire CSE-CIC-IDS2018 respingea 100% din date
+
+`scripts/prepare_cse_cic_ids2018.py` (esantionare stratificata pentru al
+doilea model expert, vezi NOTES.md/DATASET-COMPARISON.md) a rulat pana la
+capat (a procesat toate cele 10 fisiere, ~6.5GB) fara nicio eroare vizibila
+in timpul procesarii - dar la final a crapat cu `ValueError: No objects to
+concatenate`, semn ca NICIUN rand nu a supravietuit curatarii, din niciun
+fisier.
+
+cauza: `_clean_chunk()` verifica finitudinea (`np.isfinite`) pe TOATE
+coloanele in afara de "Label", inclusiv `Timestamp` - un string de tip
+data ("01/03/2018 08:17:11"), NU un numar. `pd.to_numeric(errors="coerce")`
+transforma orice string neconvertibil in NaN, deci coloana Timestamp
+devenea NaN pentru FIECARE rand, iar verificarea `.all(axis=1)` (toate
+coloanele finite) respingea automat 100% din date, indiferent de fisier.
+
+gasit prin verificare directa pe un singur fisier mic (`_clean_chunk()`
+apelat manual pe primul chunk din Thursday-01-03), nu prin re-rularea
+oarba a intregului job de 6.5GB - a confirmat fix-ul in cateva secunde
+inainte de a re-porni procesarea completa (~10+ minute).
+
+fix: `Timestamp` eliminat explicit (`chunk.drop(columns=["Timestamp"])`)
+INAINTE de verificarea de finitudine, nu doar mai tarziu in pipeline -
+oricum nu ajunge in schema finala (nu e in COLUMN_RENAME_MAP din
+nids/ml/modern/dataset.py, e identificare, nu feature). lectie: la orice
+verificare de tip "toate coloanele trebuie sa fie X", merita explicit
+listate coloanele la care chiar se aplica, nu presupus ca "restul
+coloanelor" inseamna automat "toate sunt de tipul asteptat".
+
+## bug real gasit dupa prima antrenare: plafon egal pe toate clasele a inversat raportul normal/atac
+
+prima antrenare reala a modelului expert modern (CSE-CIC-IDS2018, dupa
+fix-ul de mai sus) a rulat cu succes, dar a scos un rezultat suspect:
+acuratete generala 92.6%, dar precizie/recall doar 62%/65% pe clasa
+"normal", fata de 96%/96% pe "atac" - un model care recunoaste atacurile
+foarte bine, dar confunda des traficul normal cu atac.
+
+cauza: `SAMPLES_PER_CLASS = 50_000` se aplica UNIFORM pe toate cele 15
+clase, inclusiv "Benign" - dar "Benign" e o singura clasa in schema binara
+finala (normal vs atac), in timp ce cele 8 clase de atac cu peste 50k
+randuri (HOIC, LOIC-HTTP, Hulk, Bot, FTP-BruteForce, SSH-Bruteforce,
+Infilteration, SlowHTTPTest) au fost fiecare plafonate tot la 50k -
+verificat direct in fisierul de antrenare rezultat: 40,000 randuri Benign
+vs ~364,000 randuri atac (raport 9:1) - INVERSUL realitatii (83% din
+traficul real e normal). modelul a invatat sa "vada" mult mai putine
+exemple de normal decat de atac, si a devenit predispus sa etichetize gresit
+normal ca atac.
+
+fix: `_PER_CLASS_CAPACITY_OVERRIDES = {"Benign": 450_000}` in
+scripts/prepare_cse_cic_ids2018.py - Benign primeste un plafon separat,
+apropiat de totalul claselor de atac (~455k), nu acelasi plafon ca o
+singura clasa de atac. dupa re-rulare: precizie/recall pe "normal" a urcat
+la 91%/96% (de la 62%/65%), acuratete generala aproape neschimbata (93.2%
+fata de 92.6%) - dovada ca problema nu era "cat de bun e modelul", ci
+"cat de reprezentativ e setul de antrenare pentru cele DOUA clase finale
+(normal/atac), nu pentru cele 15 categorii brute de eticheta".
+
+lectie: la esantionare stratificata pentru o problema BINARA (normal/atac)
+derivata dintr-un set cu MULTE etichete brute, plafonul per-clasa trebuie
+gandit relativ la gruparea FINALA (2 clase), nu la numarul brut de
+categorii din date - un plafon "corect" per categorie bruta poate fi
+complet gresit per clasa finala daca o singura categorie bruta (Benign)
+reprezinta 100% dintr-o parte a clasificarii binare.
+
+## bug real gasit dupa integrarea in UI: modelul modern de 1.18 GB a incetinit toata suita de teste de la ~30s la peste 5 minute
+
+dupa ce modelul expert modern a fost legat in `DashboardPanel` (Faza 3 -
+"a doua opinie" in ConnectionInspectorDialog), rularea suitei complete de
+teste a urcat brusc de la ~30-70s la **323 secunde** (peste 5 minute),
+fara nicio schimbare vizibila in ce testau testele.
+
+cauza: `DashboardPanel.__init__()` incearca sa incarce ambele modele
+expert (vechi + modern) la fiecare instantiere - zeci de teste din multe
+fisiere (`test_dashboard_*.py`) construiesc `DashboardPanel` direct, deci
+fiecare din ele incarca acum SI modelul modern de pe disc. verificat:
+`data/models/modern_expert_random_forest.joblib` avea **1.18 GB**
+(fata de 20.7 MB la modelul vechi, NSL-KDD/125k randuri) - arborii
+RandomForest crescusera nelimitat (fara `min_samples_leaf`) pe 724,123
+randuri de antrenare, mult mai multe decat NSL-KDD. deserializarea acestui
+fisier, repetata la fiecare test, explica intreaga incetinire.
+
+fix: `min_samples_leaf` adaugat la `RandomForestClassifier` in
+`scripts/train_modern_expert_model.py` - masurat empiric (acelasi set de
+date, doar variind acest parametru):
+- `min_samples_leaf=5` -> 454 MB, acuratete 0.9439
+- `min_samples_leaf=20` -> 152 MB, acuratete 0.9442
+- `min_samples_leaf=50` -> 68 MB, acuratete 0.9435
+
+acuratetea a ramas practic neschimbata (arborii nelimitati erau doar
+inutil de mari/adanci, nu "mai buni" - de fapt usor supraadaptati, 0.9435
+e in limita normala de variatie) - ales 50, cea mai mica dimensiune fara
+nicio pierdere reala de semnal. suita de teste a revenit la ~36-55s.
+
+lectie: un model antrenat pe un set de date semnificativ mai mare decat
+precedentul (aici 5.8x) merita verificat explicit la dimensiunea
+fisierului salvat, nu doar la acuratete - un RandomForest fara limita de
+adancime creste cu volumul de date mult mai repede decat utilitatea lui
+reala, si dimensiunea mare devine o problema de PERFORMANTA (incarcare
+lenta) inainte sa devina vizibila ca problema de acuratete.
+
 ## inca doua fake-uri de captura cu semnatura veche, ratate la acelasi lot de modificari
 
 dupa ce schimbarea `strict_reporting` implicit (NOTES.md) a scos la iveala
@@ -289,3 +389,193 @@ fara `on_arp=None, on_dns=None, on_payload=None`. nu esuau explicit pentru ca
 fix: adaugate cele trei parametri lipsa la ambele. lectie confirmata:
 cautarea explicita dupa nume de functie, nu doar fixarea locului unde a picat
 un test, gaseste probleme latente inainte sa produca o eroare vizibila.
+
+## bug real gasit dupa reantrenarea honeypot mutata pe modelul modern: teste nedeterministe din cauza celui de-al doilea DEFAULT_STATE_PATH
+
+dupa ce reantrenarea din honeypot a fost mutata sa antreneze modelul
+MODERN (`nids/ml/modern/retrain.py`, in loc de cel vechi), rularea suitei
+complete de teste a scos 2 esecuri noi in `test_dashboard_live_ml.py`,
+desi acel fisier nu fusese atins de schimbare.
+
+cauza: Faza 6 (DATASET-COMPARISON.md) a introdus un AL DOILEA model local
+persistent (`ModernLocalModelManager`, propriul `DEFAULT_STATE_PATH` -
+`data/models/modern_local_model_state.joblib`). testele care apeleaza
+`_start_monitoring()` monkeypatch-uiau deja `nids.ml.local.learning.DEFAULT_STATE_PATH`
+(cel vechi) catre `tmp_path`, dar NU si echivalentul modern - deci
+`ModernLocalModelManager.load_or_new()` incarca fisierul REAL de pe disc,
+care exista deja cu date reale (402 conexiuni, acumulate de user in
+sesiunile de testare manuala anterioare). testele presupuneau un model
+local "inca invata" (cold start) si primeau unul deja activ, cu 402
+conexiuni reale amestecate in rezultat.
+
+fix: acelasi monkeypatch, dublat, in toate cele 5 fisiere de teste care
+apeleaza `_start_monitoring()` (`test_dashboard_shutdown.py`,
+`test_dashboard_ml_settings.py`, `test_dashboard_live_ml.py`,
+`test_dashboard_live_monitoring.py`, `test_dashboard_simulation.py`) -
+`nids.ml.modern.learning.DEFAULT_STATE_PATH` catre `tmp_path`, la fel ca
+cel vechi.
+
+lectie: exact tiparul deja documentat de "drift" la introducerea unui
+sistem paralel nou (ca la semnaturile de fake capture) - orice test care
+izoleaza o resursa persistenta (fisier de stare, model salvat) trebuie
+revizitat cand apare un AL DOILEA sistem cu aceeasi forma de persistenta,
+nu doar codul de productie.
+
+## bug de mediu (nu de cod propriu): suita completa de teste crapa intermitent cu segfault in joblib
+
+dupa adaugarea extinderii graficului de trafic (fara nicio legatura cu ML),
+rularea suitei COMPLETE de teste a inceput sa crape reproductibil cu
+"Segmentation fault", mereu in interiorul backend-ului de threading al
+`joblib` (folosit de `RandomForestClassifier`/`IsolationForest` la
+`predict()`/`fit()` cu `n_jobs=-1`) - trace-ul C arata sute de thread-uri
+worker acumulate (`Thread-554`, `Thread-553`, ...) in momentul crash-ului.
+
+investigat inainte sa se presupuna o cauza: fisierul unde crapa
+(`test_modern_hybrid_analysis.py`) trece CURAT, de 3 ori la rand, cand e
+rulat izolat - deci nu e un bug in acel test sau in codul din spate.
+crash-ul apare DOAR la rularea suitei complete (500+ teste), semn clar de
+ACUMULARE - multe teste creeaza/antreneaza/prezic cu RandomForest/Isolation
+Forest de-a lungul rularii, fiecare cu propriul thread-pool joblib; ceva
+in interactiunea dintre acest volum si acest build de Python (3.14, foarte
+recent) pe Windows nu elibereaza corect thread-urile intre apeluri.
+
+fix: `tests/conftest.py` (nou) - seteaza `LOKY_MAX_CPU_COUNT=1` si
+`OMP_NUM_THREADS=1` inainte de orice import, pentru toata sesiunea de
+teste. codul de PRODUCTIE (scripturile de antrenare, retrain.py) ramane
+neschimbat - tot foloseste `n_jobs=-1` pentru viteza reala pe seturi mari
+de date; doar suita de teste (modele-jucarie, cateva randuri) forteaza
+executie seriala, eliminand crearea/distrugerea repetata de thread-pool-uri.
+confirmat stabil pe 3 rulari complete consecutive dupa fix (597 teste).
+
+lectie: cand un crash apare doar la scara completa, nu la nivel de test
+individual, cauza rareori sta in testul unde se manifesta - investigheaza
+intai daca se reproduce izolat, inainte sa presupui ca schimbarea cea mai
+recenta (aici, un widget Qt fara nicio legatura cu ML) e vinovata.
+
+## BUG REAL gasit de user: monitorizarea live devine "incredibil de lag" dupa sesiuni lungi (350k+ pachete, 2 ore)
+
+user a tinut monitorizarea live pornita ~2 ore, a ajuns la 350.000+ pachete
+capturate si a observat aplicatia devenind foarte lenta. semnal decisiv,
+oferit chiar de user inainte sa apuc sa intreb: lag-ul disparea IMEDIAT la
+apasarea "Opreste monitorizare" - insemnand ca ceva legat STRICT de
+monitorizarea activa (nu Loguri, nu Trafic, nu altceva) era cauza.
+
+cauza: `LiveHybridAnalyzer._packets` (vechi) si `ModernLiveHybridAnalyzer._packets`
+(modern) cresteau NELIMITAT pe toata durata sesiunii - fiecare pachet nou
+era doar adaugat, niciodata scos. `evaluate()`, apelat periodic (implicit
+la 5 secunde) de `DashboardPanel._on_ml_evaluation_tick()`, reprocesa
+INTEGRAL toata lista la fiecare apel (`extract_nsl_kdd_style_features()`/
+`extract_cicflow_features()` pe tot ce exista pana atunci), ca sa poata
+identifica ce conexiuni sunt noi. asta insemna cost per-tick crescator
+constant cu durata sesiunii - practic patratic in timp total (mai multe
+tick-uri, fiecare tot mai scump). era deja o limitare CUNOSCUTA, notata
+explicit in docstring-ul `LiveHybridAnalyzer` inca de la construirea lui
+("creste cu volumul de trafic") - dar Faza 6 (DATASET-COMPARISON.md) a
+agravat-o direct: ambele analizoare (vechi, pentru antrenare continua in
+fundal + modern, principal) ruleaza acum `evaluate()` la FIECARE tick,
+dublând efectiv costul care era deja o problema latenta.
+
+fix: `MAX_BUFFERED_PACKETS = 20_000` in ambele module
+(`nids/core/live_hybrid.py`, `nids/ml/modern/live_hybrid.py`) -
+`self._packets` a devenit `collections.deque(maxlen=...)` in loc de
+`list` simplu, o fereastra glisanta pe ULTIMELE pachete (evictie O(1),
+spre deosebire de `list.pop(0)`). NU afecteaza deduplicarea - `_evaluated_connections`/
+`_evaluated_flows` raman seturi separate, neplafonate (doar tupluri, cost
+neglijabil), deci o conexiune tot e evaluata o singura data, atata timp
+cat pachetele ei mai sunt in fereastra (in practica mereu, tick-urile
+ruleaza mult mai des decat timpul necesar ferestrei de 20k sa se umple).
+
+validat empiric dupa fix: 350.000 de pachete + 70 de tick-uri periodice
+(simuland exact scenariul userului) proceseaza in **0.52 secunde** total,
+bufferul ramane plafonat corect la 20.000.
+
+nota separata, NU inca reparata: `DashboardPanel._all_packets` (folosit
+pentru "Analizeaza aceasta conexiune"/"Reconstruieste conexiunea" la
+cerere, nu periodic) ramane neplafonat - creste in continuare nelimitat pe
+durata unei sesiuni live. nu cauzeaza lag CONTINUU (nu ruleaza pe un timer,
+doar la click), dar ar face un singur click de analiza lent dupa o sesiune
+foarte lunga, plus consum de memorie crescator. lasat deliberat neatins in
+acest fix - PCAP-urile incarcate folosesc ACEEASI variabila si au nevoie de
+lista COMPLETA (nu se poate plafona global fara sa rupa analiza PCAP) -
+ar necesita o solutie separata (ex: doar pentru path-ul live), nu inclusa
+aici ca sa nu creasca riscul acestei modificari.
+
+## BUG REAL gasit de user: analiza unui rand din Loguri dintr-o sesiune anterioara "redimensioneaza" fereastra principala, fara sa apara vreun dialog
+
+user a incercat sa analizeze cu ML un rand din Loguri provenit dintr-o
+sesiune anterioara (aplicatia repornita intre timp) - in loc de dialogul
+de analiza sau un mesaj clar, doar fereastra principala se redimensiona
+vizibil, fara nicio alta reactie. randuri noi (din sesiunea curenta) se
+analizau normal, fara nicio problema.
+
+cauza: NU era o exceptie ascunsa. `_on_log_analyze_requested()` ->
+`_analyze_connection()` functiona corect - `_all_packets` (in memorie, nu
+persistat) nu mai contine pachetele unei sesiuni vechi, deci se ajungea
+corect pe ramura `self._status_label.setText("nu s-a putut identifica
+conexiunea - probabil traficul brut nu mai e disponibil (alta sesiune sau
+pachete deja iesite din istoric)")` - cel mai lung mesaj de status din
+toata aplicatia. `self._status_label` era un `QLabel` simplu, fara word
+wrap, asezat in bara de sus (`top_bar`, un `QHBoxLayout`) - fara wrap,
+latimea minima a unui QLabel e latimea intregului text pe un singur rand,
+deci layout-ul cerea mai mult spatiu orizontal decat avea fereastra, iar
+Qt marea fereastra principala ca sa incapa. orice alt mesaj de status
+existent era suficient de scurt incat sa nu declanseze vizibil asta -
+de-asta doar acest caz specific parea stricat.
+
+fix: `self._status_label.setWordWrap(True)` + `setMaximumWidth(400)` in
+`DashboardPanel.__init__` (`nids/ui/widgets/dashboard_panel.py`) - labelul
+acum se infasoara pe mai multe randuri in loc sa ceara latime nelimitata,
+deci fereastra principala nu mai creste indiferent cat de lung e mesajul.
+comportamentul de fond (nu exista dialog pentru o conexiune din alta
+sesiune, doar un mesaj de status) ramane neschimbat si e corect - problema
+era exclusiv vizuala (`test_status_label_has_word_wrap_enabled`,
+`test_log_analyze_requested_for_previous_session_connection_shows_message`
+in `tests/test_dashboard_analyze.py`).
+
+## BUG REAL gasit de user: coloana "prefix BGP" din dialogul de identificare IP-uri era taiata
+
+dupa adaugarea coloanelor AS/organizatie/tara/prefix BGP (vezi NOTES.md,
+lookup Team Cymru), user a semnalat ca prefixul BGP nu se vedea complet
+(ex: "104.18.32.0/..." in loc de "104.18.32.0/20") fara sa redimensioneze
+manual fereastra.
+
+cauza: doar coloanele "nume de host (PTR)" si "organizatie/ISP" aveau un
+resize mode explicit (`Stretch`) - restul (IP, AS, tara, prefix BGP)
+ramaneau pe modul implicit al `QTableWidget` (latime fixa, nu neaparat
+suficienta pentru continut).
+
+fix: `IpLookupResultsDialog` (`nids/ui/widgets/ip_lookup_dialog.py`)
+seteaza acum explicit `ResizeToContents` pentru IP/AS/tara/prefix BGP
+(coloane cu continut scurt si de latime relativ constanta) - se
+redimensioneaza automat dupa continutul efectiv - si pastreaza `Stretch`
+doar pe hostname/organizatie (singurele cu lungime variabila mare).
+latimea implicita a dialogului a crescut la 1000px (de la 760px).
+
+## limitare cunoscuta, acum inchisa: DashboardPanel._all_packets neplafonat pe sesiuni live lungi
+
+notata (dar deliberat neatinsa) la fix-ul de lag din monitorizarea live
+(vezi mai sus): spre deosebire de bufferul intern al analizoarelor
+(`LiveHybridAnalyzer`/`ModernLiveHybridAnalyzer._packets`, deja plafonat la
+20.000), `DashboardPanel._all_packets` - folosit pentru "Analizeaza aceasta
+conexiune"/"Reconstruieste conexiunea" la cerere, din Trafic - ramanea o
+lista simpla, neplafonata. nu cauza lag continuu (nu ruleaza pe un timer),
+dar ar fi facut un singur click de analiza tot mai lent pe o sesiune foarte
+lunga (reproceseaza toata lista), plus consum de memorie crescator.
+
+de la Faza 7 (DATASET-COMPARISON.md - persistarea assessment_json si
+pentru modelul modern), evenimentele deja RAPORTATE nu mai depind deloc de
+aceasta lista (au propria "poza" salvata) - singurul rol ramas al ei e
+analiza directa a unei conexiuni INCA neevaluate, din Trafic, sau
+reconstructia packet-forensics - ambele despre trafic RECENT, nu istoric
+vechi. asta a facut plafonarea sigura de facut acum.
+
+fix: `MAX_ALL_PACKETS = 50_000` (`nids/ui/widgets/dashboard_panel.py`) -
+`self._all_packets` devine `collections.deque(maxlen=...)` DOAR la
+`_start_monitoring()` (calea live). `_on_load_clicked()` (PCAP incarcat)
+ramane NEATINS - atribuie in continuare o lista simpla, completa, din
+`read_pcap()` (are nevoie de tot fisierul, nu de o fereastra glisanta).
+consumatorii (`extract_nsl_kdd_style_features`, `extract_cicflow_features`,
+`packets_for_connection`) primesc explicit `list(self._all_packets)`, la
+fel ca in `LiveHybridAnalyzer.evaluate()` - desi toate trei doar itereaza
+(ar functiona si direct pe deque), conversia explicita pastreaza acelasi
+tipar folosit deja in tot proiectul.

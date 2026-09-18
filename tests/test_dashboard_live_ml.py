@@ -26,6 +26,9 @@ def _make_panel(tmp_path: Path, monkeypatch, ml_settings: MlSettings | None = No
     monkeypatch.setattr(
         "nids.ml.local.learning.DEFAULT_STATE_PATH", tmp_path / "local_state.joblib"
     )
+    monkeypatch.setattr(
+        "nids.ml.modern.learning.DEFAULT_STATE_PATH", tmp_path / "modern_local_state.joblib"
+    )
     event_store = EventStore(tmp_path / "test.db")
     return DashboardPanel(
         BlockManager(add_rule=lambda ip: None, remove_rule=lambda ip: None),

@@ -42,12 +42,19 @@ class MlPanel(QWidget):
         self._settings = settings
 
         self._expert_label = QLabel()
+        self._metrics_label = QLabel()
+        self._metrics_label.setWordWrap(True)
         self._local_label = QLabel()
         self._local_label.setWordWrap(True)
+        self._old_status_label = QLabel()
+        self._old_status_label.setWordWrap(True)
+        self._old_status_label.setStyleSheet("color: #8a8a8a;")
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._expert_label)
+        layout.addWidget(self._metrics_label)
         layout.addWidget(self._local_label)
+        layout.addWidget(self._old_status_label)
         layout.addWidget(self._build_settings_group())
         layout.addStretch()
 
@@ -57,12 +64,17 @@ class MlPanel(QWidget):
         self._timer.start(_REFRESH_INTERVAL_MS)
 
     def _refresh(self) -> None:
-        if self._dashboard.expert_model_loaded():
-            self._expert_label.setText("Model expert: incarcat (Random Forest, NSL-KDD)")
+        # Faza 6 (DATASET-COMPARISON.md): modelul MODERN (CSE-CIC-IDS2018)
+        # e principal - status-ul de mai jos descrie el, nu cel vechi
+        if self._dashboard.modern_expert_model_loaded():
+            self._expert_label.setText("Model expert: incarcat (Random Forest, CSE-CIC-IDS2018)")
         else:
             self._expert_label.setText(
-                "Model expert: LIPSA - ruleaza scripts/train_expert_model.py"
+                "Model expert: LIPSA - ruleaza scripts/prepare_cse_cic_ids2018.py "
+                "+ scripts/train_modern_expert_model.py"
             )
+
+        self._refresh_metrics()
 
         status = self._dashboard.local_model_status()
         if status is None:
@@ -79,6 +91,46 @@ class MlPanel(QWidget):
                 f"{status.samples_collected} conexiuni (fereastra glisanta, se "
                 "reantreneaza periodic, continua intre sesiuni)"
             )
+
+        self._refresh_old_status()
+
+    def _refresh_metrics(self) -> None:
+        """performanta pe test set a modelului modern - calculata la
+        (re)antrenare, salvata alaturi de model (nids.ml.modern.model.build_metrics),
+        NU hardcodata aici - ramane adevarata dupa o reantrenare din
+        honeypot, care schimba efectiv acuratetea"""
+        metrics = self._dashboard.modern_expert_metrics()
+        if metrics is None:
+            self._metrics_label.setText("")
+            return
+        self._metrics_label.setText(
+            f"Performanta (test propriu): acuratete {metrics['accuracy']:.1%} - "
+            f"normal {metrics['normal_precision']:.0%}/{metrics['normal_recall']:.0%} "
+            f"(precizie/recall), atac {metrics['attack_precision']:.0%}/"
+            f"{metrics['attack_recall']:.0%}"
+        )
+
+    def _refresh_old_status(self) -> None:
+        """modelul vechi (NSL-KDD) - "a doua opinie", ruleaza in fundal
+        (antrenat continuu daca monitorizarea live e pornita) dar nu mai
+        genereaza evenimente principale - vezi DATASET-COMPARISON.md"""
+        old_expert = (
+            "incarcat" if self._dashboard.expert_model_loaded() else "lipsa"
+        )
+        old_status = self._dashboard.old_local_model_status()
+        if old_status is None:
+            old_local = "monitorizarea live nu ruleaza"
+        elif old_status.is_learning:
+            old_local = (
+                f"invata ({old_status.samples_collected}/{old_status.min_training_samples})"
+            )
+        else:
+            old_local = f"activ ({old_status.samples_collected} conexiuni)"
+
+        self._old_status_label.setText(
+            f"A doua opinie (NSL-KDD, 1998-99): expert {old_expert}, local {old_local} - "
+            "vizibila la inspectia unei conexiuni, nu genereaza alerte principale"
+        )
 
     # --- setari (aplicate la urmatoarea pornire a monitorizarii) ---
 

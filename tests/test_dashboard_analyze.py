@@ -5,13 +5,14 @@ from PySide6.QtWidgets import QApplication
 from nids.capture.pcap_reader import read_pcap
 from nids.core.event import Event, Severity
 from nids.core.inspect import assess_connection, assessment_to_json
+from nids.ml.modern.inspect import assess_modern, modern_assessment_to_json
 from nids.response.manager import BlockManager
 from nids.storage.event_store import EventStore, StoredEvent
-from nids.ui.widgets.dashboard_panel import DashboardPanel, _find_matching_connection
+from nids.ui.widgets.dashboard_panel import DashboardPanel, _find_matching_connection, _load_assessment_json
 from nids.ui.widgets.logs_panel import LogsPanel
 from nids.ui.widgets.signatures_panel import SignaturesPanel
 from nids.ui.widgets.traffic_panel import TrafficPanel
-from tests.factories import make_record
+from tests.factories import make_cicflow_record, make_record
 
 PCAP_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / "http.cap"
 
@@ -113,6 +114,93 @@ def test_log_analyze_requested_opens_dialog_from_saved_assessment_without_packet
 
     assert len(panel._inspector_dialogs) == 1
     panel._inspector_dialogs[0].close()
+
+
+def test_log_analyze_requested_for_previous_session_connection_shows_message(tmp_path):
+    """BUG REAL gasit de user: un eveniment ML fara assessment_json (ex:
+    generat de pipeline-ul modern, care nu salveaza inca aceasta "poza")
+    dintr-o sesiune anterioara nu mai are pachetele brute in _all_packets
+    (in memorie, nu persistate) - nu trebuie sa arunce nicio exceptie,
+    doar sa arate un mesaj de status, oricat de lung"""
+    _app()
+    panel = _make_panel(tmp_path)
+    panel._all_packets = []  # sesiune noua, pachetele vechi nu mai exista
+    entry = StoredEvent(
+        timestamp="2026-01-01T00:00:00",
+        event_type="anomalie noua",
+        source_ip="10.0.0.1",
+        severity="ridicata",
+        description="test",
+        dest_ip="10.0.0.2",
+        src_port=12345,
+        dest_port=80,
+        protocol="tcp",
+    )
+
+    panel._on_log_analyze_requested(entry)
+
+    assert "nu exista trafic" in panel._status_label.text()
+    assert len(panel._inspector_dialogs) == 0
+
+
+def test_status_label_has_word_wrap_enabled(tmp_path):
+    """BUG REAL gasit de user: mesajul de status pentru o conexiune
+    negasita e cel mai lung din aplicatie - fara word wrap, QLabel isi
+    cerea o latime minima egala cu tot textul, iar fereastra principala se
+    redimensiona vizibil, desi tehnic niciun dialog nu trebuia sa apara"""
+    _app()
+    panel = _make_panel(tmp_path)
+
+    assert panel._status_label.wordWrap() is True
+
+
+def test_log_analyze_requested_opens_dialog_from_saved_modern_assessment(tmp_path, monkeypatch):
+    """de la Faza 6, modelul modern e principalul care mai salveaza
+    assessment_json pentru evenimente live (ModernLiveHybridAnalyzer) -
+    trebuie sa se deschida la fel, fara pachete brute, chiar daca nu
+    exista deloc o analiza a modelului vechi pentru acest eveniment"""
+    monkeypatch.setattr(
+        "nids.ui.widgets.dashboard_panel.ConnectionInspectorDialog.show", lambda self: None
+    )
+
+    _app()
+    panel = _make_panel(tmp_path)
+    panel._all_packets = []
+
+    modern = assess_modern(make_cicflow_record(), expert=None, local_manager=None)
+    event = Event(
+        event_type="anomalie noua",
+        source_ip="10.0.0.1",
+        severity=Severity.HIGH,
+        description="test",
+        dest_ip="10.0.0.2",
+        assessment_json=modern_assessment_to_json(modern),
+    )
+    panel._event_store.save(event)
+    entry = panel._event_store.recent()[0]
+
+    panel._on_log_analyze_requested(entry)
+
+    assert len(panel._inspector_dialogs) == 1
+    panel._inspector_dialogs[0].close()
+
+
+def test_load_assessment_json_dispatches_old_format():
+    assessment = assess_connection(make_record(), expert=None, local_manager=None)
+
+    old, modern = _load_assessment_json(assessment_to_json(assessment))
+
+    assert old is not None
+    assert modern is None
+
+
+def test_load_assessment_json_dispatches_modern_format():
+    assessment = assess_modern(make_cicflow_record(), expert=None, local_manager=None)
+
+    old, modern = _load_assessment_json(modern_assessment_to_json(assessment))
+
+    assert old is None
+    assert modern is not None
 
 
 def test_manual_block_event_can_be_analyzed_from_logs(tmp_path, monkeypatch):

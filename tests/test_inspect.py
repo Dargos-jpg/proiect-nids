@@ -148,6 +148,35 @@ def test_assessment_from_json_handles_missing_score_key():
     assert restored.local_anomaly_score is None
 
 
+def test_assessment_json_payload_is_marked_with_old_model_key():
+    """disambiguare fata de blob-urile modelului modern (vezi
+    nids.ml.modern.inspect.modern_assessment_to_json) -
+    DashboardPanel._load_assessment_json foloseste aceasta cheie"""
+    import json
+
+    payload = json.loads(
+        assessment_to_json(assess_connection(make_record(), expert=None, local_manager=None))
+    )
+
+    assert payload["model"] == "old"
+
+
+def test_assessment_from_json_handles_missing_model_key():
+    """compatibilitate retroactiva: blob-uri salvate pe disc inainte de
+    introducerea cheii "model" (vezi commit-ul respectiv) nu au aceasta
+    cheie deloc - trebuie sa se parseze in continuare, fara sa arunce"""
+    import json
+
+    payload = json.loads(
+        assessment_to_json(assess_connection(make_record(), expert=None, local_manager=None))
+    )
+    del payload["model"]
+
+    restored = assessment_from_json(json.dumps(payload))
+
+    assert restored.explanation != ""
+
+
 def test_assessment_json_round_trip_without_models():
     original = assess_connection(make_record(), expert=None, local_manager=None)
 
